@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""Local hook adapter. No sockets, subprocesses, or notification delivery."""
+import argparse
+import json
+import sys
+from peer_core import hook_deliver, observe, prompt_receipts
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--kind', choices=('claude', 'codex'), required=True)
+args = parser.parse_args()
+try:
+    event = json.load(sys.stdin)
+    row = observe(event, args.kind)
+    if row:
+        prompt_receipts(row, event)
+        output = hook_deliver(row, event)
+        if output:
+            print(json.dumps(output, ensure_ascii=False))
+except Exception:
+    pass  # A peer observation must never break an agent turn or disclose its prompt.

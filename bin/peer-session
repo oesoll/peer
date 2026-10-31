@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Run Codex with an app-server peer can reach: `peer run codex [codex args]`.
+
+A Codex TUI keeps its app-server inside its own process, where nothing outside can talk to it.
+This starts one private server for one TUI and attaches the TUI with --remote, so peer can start
+or steer turns and read the thread's state. The server belongs to that TUI alone, so restarting a
+shared daemon cannot cut it off, and it ends when the TUI exits."""
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from peer_codex import watch
+from peer_core import launcher
+
+
+def interrupted(signum, frame):
+    raise SystemExit(128 + signum)
+
+
+def config_overrides(args):
+    """-c/--config/--enable/--disable pairs. The server builds the thread, so it needs them too:
+    given only to a --remote TUI, overrides such as developer_instructions never reach the model."""
+    out, i = [], 0
+    while i < len(args):
+        if args[i] in ('-c', '--config', '--enable', '--disable') and i + 1 < len(args):
+            out += args[i:i + 2]; i += 2
+        elif args[i].startswith(('--config=', '--enable=', '--disable=')):
+            out.append(args[i]); i += 1
+        else:
+            i += 1
+    return out
+
+
+def main(args):
+    signal.signal(signal.SIGHUP, interrupted)
+    signal.signal(signal.SIGTERM, interrupted)
+    stopped = threading.Event()
+    server = None
+    # /tmp keeps the socket path under macOS's 104-byte limit; a longer one fails to bind.
+    with tempfile.TemporaryDirectory(prefix='peer-codex-', dir='/tmp') as temp:
+        sock = str(Path(temp) / 'c.sock')
+        env = dict(os.environ, PEER_CODEX_SOCKET=sock)
+        server = subprocess.Popen([os.environ.get('PEER_CODEX_BIN', 'codex'), 'app-server', '--listen', 'unix://' + sock]
+                                  + config_overrides(args),
+                                  env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for _ in range(100):
+                if Path(sock).exists():
+                    break
+                if server.poll() is not None:
+                    sys.exit('peer: codex app-server exited during startup')
+                time.sleep(.1)
+            threading.Thread(target=watch, args=(server, sock, stopped), daemon=True).start()
+            result = subprocess.run(launcher('codex') + ['--remote', 'unix://' + sock] + args, env=env)
+        finally:
+            stopped.set()
+            server.terminate()
+            try:
+                server.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait()
+    return result.returncode
+
+
+if __name__ == '__main__':
+    if sys.argv[1:2] != ['codex']:
+        sys.exit('usage: peer run codex [codex args]  (Claude needs no launcher)')
+    sys.exit(main(sys.argv[2:]))

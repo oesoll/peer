@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""Speak to a session by name. Terminal input is never part of peer delivery."""
+import argparse
+import collections
+import json
+import os
+from pathlib import Path
+import secrets
+import subprocess
+import sys
+import time
+from peer_core import (alive, claim_name, host, key, lock, me, path, permission_mode, process, public, read,
+                       receipt, root, session, sessions, update_receipt, valid_name, write)
+from peer_delivery import receive, start_worker, work
+from peer_transport import BIN, hosts, inventory, remote
+
+
+def local_inventory():
+    rows = [public(row) for row in sessions()]
+    sockets = {row.get('tmux_socket') for row in rows if str(row.get('target', '')).startswith('%')}
+    for sock in sockets:
+        if not sock:
+            continue
+        result = subprocess.run(['tmux', '-S', sock, 'list-panes', '-a', '-F',
+                                 '#{pane_id}\t#{session_name}\t#{window_index}\t#{pane_index}'],
+                                capture_output=True, text=True, timeout=2)
+        places = {}
+        for line in result.stdout.splitlines():
+            fields = line.split('\t')
+            if len(fields) == 4:
+                places[fields[0]] = fields[1:]
+        for row in rows:
+            if row.get('tmux_socket') == sock and row.get('target') in places:
+                group, window, pane = places[row['target']]
+                row.update(group=group, window=int(window), pane=int(pane))
+    for row in rows:
+        row.setdefault('group', 'no tmux')
+    return rows
+
+
+def all_peers():
+    return inventory(local_inventory())
+
+
+def resolve(name):
+    rows, errors = all_peers()
+    if '@' in name:
+        name, owner = name.rsplit('@', 1)
+        rows = [r for r in rows if r['host'] == owner]
+    matches = [r for r in rows if r['name'] == name]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise ValueError('ambiguous name; use ' + ' or '.join(r['name'] + '@' + r['host'] for r in matches))
+    raise ValueError('peer not found: ' + name + '; run peer --all' + ('; unreachable: ' + '; '.join(errors) if errors else ''))
+
+
+def dispatch(owner, request):
+    return rpc(request, host()) if owner == host() else remote(owner, request)
+
+
+def rpc(request, source):
+    op = request.get('op')
+    if op == 'spawn':
+        from peer_spawn import spawn
+        return spawn([request['name'], '--kind', request['kind'], '--cwd', request['cwd'],
+                      '--timeout', str(request.get('timeout', 5)), '--'] + request.get('args', []))
+    if op == 'list':
+        return {'peers': local_inventory()}
+    if op == 'receive':
+        return receive(request, source)
+    if op == 'receipt':
+        row = receipt(request['id'])
+        if not row:
+            raise ValueError('receipt not found on ' + host())
+        return row
+    if op == 'read':
+        from peer_history import history
+        row = session(request['session'])
+        if not row:
+            raise ValueError('session is not registered; refresh peer list')
+        last = request.get('last', 3)
+        if not isinstance(last, int) or not 1 <= last <= 10:
+            raise ValueError('last must be between 1 and 10')
+        return history(row, last)
+    raise ValueError('unsupported peer operation')
+
+
+def clean(text, limit=90):
+    return ' '.join(str(text or '').split())[:limit]
+
+
+def list_peers(query='', show_all=False, as_json=False):
+    rows, errors = all_peers()
+    current = me(False)
+    own = next((r for r in rows if current and r['id'] == current['id'] and r['host'] == host()), {})
+    cwd = own.get('cwd') or os.getcwd()
+    contacts = read(root() / 'contacts.json')
+    def rank(row):
+        same = row['host'] == host() and own.get('group') not in (None, 'no tmux') and row.get('group') == own.get('group')
+        try:
+            common = os.path.commonpath([cwd, row.get('cwd') or '/'])
+        except ValueError:
+            common = '/'
+        close = common not in ('/', str(Path.home()), str(Path.home().parent)) and (
+            common in (cwd, row.get('cwd')) or Path(cwd).parent == Path(row.get('cwd') or '/').parent)
+        contact = contacts.get(row['host'] + '/' + row['id'], 0)
+        return (0 if same else 1 if close else 2 if contact else 3,
+                row['host'], row.get('group', ''), row.get('window', 0), row.get('pane', 0), -contact, row['name'])
+    rows.sort(key=rank)
+    hidden = []
+    if query:
+        rows = [r for r in rows if query.casefold() in ' '.join(str(r.get(k) or '') for k in ('name', 'cwd', 'title')).casefold()]
+    elif not show_all:
+        rows = [r for r in rows if r['state'] != 'gone']  # ended sessions only under --all
+        visible = [r for r in rows if rank(r)[0] < 3][:20]
+        if not visible:
+            visible = rows[:8]
+        hidden = [r for r in rows if r not in visible]
+        rows = visible
+    if as_json:
+        return {'peers': rows, 'hidden': len(hidden), 'unreachable': errors}
+    group = None
+    counts = collections.Counter(r['name'] for r in rows)
+    for row in rows:
+        new_group = row['host'] + ' / ' + row.get('group', 'Other')
+        if new_group != group:
+            print(new_group)
+            group = new_group
+        name = row['name'] + ('@' + row['host'] if counts[row['name']] > 1 else '')
+        state = row['state']
+        if state == 'waiting-on':
+            state += '(' + row['waiting_on'] + ')'
+        if state == 'blocked':
+            state += '(' + (row.get('reason') or 'user') + ')'
+        age = str(max(0, int(time.time() - (row.get('since') or time.time())))) + 's'
+        location = str(row.get('window', '-')) + '.' + str(row.get('pane', '-'))
+        print('  ' + location + ' ' + name + '  ' + row['kind'] + '  ' + state + ' ' + age + '  ' + clean(row['cwd'], 60) + (' · ' + clean(row['title'], 50) if row.get('title') else ''))
+    if hidden:
+        groups = collections.Counter(r['host'] + ' ' + r.get('group', 'Other') for r in hidden)
+        print(' · '.join(g + ' ' + str(n) + ' peers' for g, n in groups.items()) + ' — peer --all')
+    if errors:
+        print('Unavailable: ' + '; '.join(errors), file=sys.stderr)
+    if not rows:
+        print('No matching peers. Install peer-hook or use peer spawn.')
+
+
+SETTLE = 4  # seconds say waits so its one line already tells where the message went
+
+
+def settled(owner, ident, result):
+    """Follow the receipt past queued/sending. Without this say printed "queued · mailbox" nearly
+    every time and the sender had to call peer receipt to learn anything."""
+    end = time.monotonic() + SETTLE
+    while result.get('stage') in ('queued', 'sending') and time.monotonic() < end:
+        time.sleep(.3)
+        try:
+            result = dispatch(owner, {'op': 'receipt', 'id': ident})
+        except (ValueError, OSError, subprocess.SubprocessError):
+            break
+    return result
+
+
+def say(name, body, ask=False, timeout=30):
+    sender = me()
+    target = resolve(name)
+    ident = secrets.token_hex(12)
+    outgoing = dict(id=ident, sender=sender['id'], recipient=target['id'], host=target['host'], name=target['name'], created=time.time(), ask=ask)
+    # A plain reply needs no re:id. Link to the newest delivered message from
+    # that session; parallel unrelated conversations should use separate peers.
+    pending = [read(p) for p in (root() / 'receipts').glob('*.json')]
+    pending = [r for r in pending if r.get('recipient') == sender['id'] and r.get('sender', {}).get('id') == target['id']
+               and r.get('sender', {}).get('host') == target['host'] and r.get('stage') == 'delivered']
+    reply_to = max(pending, key=lambda r: r['created'])['id'] if pending else None
+    write(path('outgoing', ident), outgoing)
+    waiting_path = path('waiting', sender['id'])
+    if ask:
+        with lock(waiting_path):
+            previous = read(waiting_path)
+            if previous.get('until', 0) > time.time() and alive(previous):
+                raise ValueError('this session already has an active ask; finish it before asking again')
+            write(waiting_path, dict(message=ident, peer_id=target['id'], peer_host=target['host'], name=target['name'],
+                                     since=time.time(), until=time.time() + timeout, process=process(os.getpid())))
+    request = dict(op='receive', id=ident, recipient=target['id'], body=body, ask=ask, reply_to=reply_to,
+                   sender=dict({k: sender[k] for k in ('id', 'name', 'host')},
+                               mode=permission_mode((sender.get('process') or {}).get('pid', 0))))
+    try:
+        result = dispatch(target['host'], request)
+        if reply_to:
+            update_receipt(reply_to, stage='replied', reply=ident)
+        with lock(root() / 'contacts.json'):
+            contacts = read(root() / 'contacts.json')
+            contacts[target['host'] + '/' + target['id']] = time.time()
+            write(root() / 'contacts.json', contacts)
+        result['owner'] = target['host']
+        if not ask:
+            return dict(settled(target['host'], ident, result), owner=target['host'])
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            answer_path = path('answers', ident)
+            answer = read(answer_path)
+            if answer:
+                answer_path.unlink()
+                return dict(id=ident, stage='replied', from_peer=target['name'], answer=answer['body'])
+            time.sleep(.1)
+        return dict(id=ident, stage='timeout', owner=target['host'], reason='question remains sent; late reply arrives normally')
+    finally:
+        if ask and read(waiting_path).get('message') == ident:
+            waiting_path.unlink(missing_ok=True)
+
+
+def main(argv):
+    if argv and argv[0] == '_rpc':
+        print(json.dumps(rpc(json.loads(argv[2]), argv[1])))
+        return
+    if argv and argv[0] == '_work':
+        work('--once' in argv)
+        return
+    as_json = '--json' in argv
+    argv = [a for a in argv if a != '--json']
+    if argv and argv[0] in ('install', 'uninstall'):
+        from peer_setup import install
+        return install(argv)
+    if argv and argv[0] == 'doctor':
+        from peer_setup import doctor
+        sys.exit(doctor(argv))
+    if argv and argv[0] == 'run':
+        os.execv(sys.executable, [sys.executable, str(BIN / 'peer-session')] + argv[1:])
+    if not argv or argv[0] == '--all' or argv[0] not in ('say', 'ask', 'wait', 'me', 'name', 'read', 'receipt', 'spawn', '-h', '--help'):
+        result = list_peers(' '.join(argv) if argv and argv[0] != '--all' else '', '--all' in argv, as_json)
+    elif argv[0] in ('-h', '--help'):
+        print('''peer — talk to your other coding agents by name
+
+  peer [search] [--all]              who is near you, what each is doing (--all: everyone)
+  peer say NAME "text"               send; prints where it went (delivered / queued / held)
+  peer ask NAME "question"           wait (up to 60s) and print their reply
+  peer read NAME [--last 3]          their last answers, from the engine's own history
+  peer wait NAME [--until idle]      wait for a state
+  peer me | peer name NEW            who you are / rename yourself (kept across resume)
+  peer receipt HOST/ID               where a message stopped
+  peer spawn NAME --kind claude|codex [--cwd DIR] [--host HOST] [-- ARGS]
+  peer run codex [ARGS]              start Codex so peer can reach it
+  peer install [--accept-inbound]    hook into Claude Code and Codex
+  peer doctor                        what works, what is missing, how to fix it
+
+Messages go through each engine's own input path, never your terminal:
+a draft you are typing stays intact and an approval prompt never gets an Enter.
+NAME@HOST picks one when two machines use the same name. Add --json for scripts.''')
+        return
+    elif argv[0] == 'me':
+        result = public(me())
+    elif argv[0] == 'name':
+        if len(argv) != 2:
+            raise ValueError('usage: peer name NAME')
+        current = me()
+        name = claim_name(current['id'], argv[1], explicit=True)
+        with lock(path('sessions', current['id'])):
+            current = session(current['id']);current['name'] = name;current['named'] = True
+            write(path('sessions', current['id']), current)
+        result = public(current)
+    elif argv[0] in ('say', 'ask'):
+        parser = argparse.ArgumentParser(prog='peer ' + argv[0])
+        parser.add_argument('name');parser.add_argument('text');parser.add_argument('--timeout', type=float, default=30)
+        args = parser.parse_args(argv[1:])
+        if not 0 < args.timeout <= 60:
+            raise ValueError('timeout must be in (0, 60] seconds')
+        result = say(args.name, args.text, argv[0] == 'ask', args.timeout)
+    elif argv[0] == 'receipt':
+        owner, ident = argv[1].split('/', 1)
+        result = dict(dispatch(owner, {'op': 'receipt', 'id': ident}), owner=owner)
+    elif argv[0] == 'read':
+        parser = argparse.ArgumentParser(prog='peer read')
+        parser.add_argument('name');parser.add_argument('--last', type=int, default=3)
+        args = parser.parse_args(argv[1:])
+        row = resolve(args.name);result = dispatch(row['host'], {'op': 'read', 'session': row['id'], 'last':args.last})
+    elif argv[0] == 'wait':
+        parser = argparse.ArgumentParser(prog='peer wait')
+        parser.add_argument('name');parser.add_argument('--until', default='idle');parser.add_argument('--timeout', type=float, default=30)
+        args = parser.parse_args(argv[1:])
+        if not 0 < args.timeout <= 60:
+            raise ValueError('timeout must be in (0, 60] seconds')
+        target = resolve(args.name)
+        end = time.monotonic() + args.timeout
+        while True:
+            rows = dispatch(target['host'], {'op': 'list'})['peers']
+            row = next(r for r in rows if r['id'] == target['id'])
+            if row['state'] == args.until or time.monotonic() >= end:
+                result = dict(peer=row, reached=row['state'] == args.until);break
+            time.sleep(.5)
+    else:
+        from peer_spawn import spawn
+        result = spawn(argv[1:])
+    if result is not None:
+        if as_json:
+            print(json.dumps(result, ensure_ascii=False))
+        elif 'answer' in result:
+            print(result['answer'])
+        elif 'stage' in result:
+            print(result['stage'] + ' · ' + str(result.get('route') or 'mailbox') + ' · ' + str(result.get('owner') or host()) + '/' + result['id']
+                  + (' · ' + result['reason'] if result.get('reason') else ''))
+        elif 'text' in result:
+            print(result['text'], end='')
+        else:
+            print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == '__main__':
+    try:
+        main(sys.argv[1:])
+    except (ValueError, OSError, TimeoutError, subprocess.SubprocessError) as error:
+        sys.exit('peer: ' + str(error))
