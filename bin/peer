@@ -4,6 +4,7 @@ import argparse
 import collections
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import subprocess
@@ -90,6 +91,11 @@ def clean(text, limit=90):
     return ' '.join(str(text or '').split())[:limit]
 
 
+def short_path(path):
+    """~ for a home folder on any machine, so lists stay readable (and don't print account names)."""
+    return re.sub(r'^/(?:Users|home)/[^/]+(?=/|$)', '~', str(path or ''))
+
+
 def list_peers(query='', show_all=False, as_json=False):
     rows, errors = all_peers()
     current = me(False)
@@ -135,7 +141,7 @@ def list_peers(query='', show_all=False, as_json=False):
             state += '(' + (row.get('reason') or 'user') + ')'
         age = str(max(0, int(time.time() - (row.get('since') or time.time())))) + 's'
         location = str(row.get('window', '-')) + '.' + str(row.get('pane', '-'))
-        print('  ' + location + ' ' + name + '  ' + row['kind'] + '  ' + state + ' ' + age + '  ' + clean(row['cwd'], 60) + (' · ' + clean(row['title'], 50) if row.get('title') else ''))
+        print('  ' + location + ' ' + name + '  ' + row['kind'] + '  ' + state + ' ' + age + '  ' + clean(short_path(row['cwd']), 60) + (' · ' + clean(row['title'], 50) if row.get('title') else ''))
     if hidden:
         groups = collections.Counter(r['host'] + ' ' + r.get('group', 'Other') for r in hidden)
         print(' · '.join(g + ' ' + str(n) + ' peers' for g, n in groups.items()) + ' — peer --all')
