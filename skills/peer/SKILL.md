@@ -23,6 +23,8 @@ peer spawn NAME --kind claude|codex [--cwd DIR] [--host HOST] [-- ARGS]
 - `queued` — they are working and get it at their next tool call.
 - `held` — they are waiting on their user, or cannot take input right now. It is kept and delivered when they can; do not resend.
 
+The end of the line says what it waits for. When that names a fix (`peer install --accept-inbound`, restarting Codex through `peer run codex`), it changes your user's setup: tell them, and let them decide.
+
 After `say`, stop. The reply arrives in your own context as `[from NAME@HOST] text`; answer with `peer say NAME "…"`. Use `ask` only when you cannot continue without the answer.
 
 States are facts, not guesses: `working`, `blocked(permission|question)` (waiting on their user), `idle` (no turn running — not the same as finished), `waiting-on(NAME)` (asking someone), `gone`, `unknown`.

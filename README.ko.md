@@ -22,14 +22,28 @@ peer는 터미널에 치지 않아요. 각 엔진이 원래 가진 입력 길로
 
 ## 설치
 
+Claude Code나 Codex에 이 한 줄을 붙여넣고 에이전트에게 맡기세요.
+
+```
+peer 설정해 줘: curl -fsSL https://raw.githubusercontent.com/oesoll/peer/main/SETUP.md 를 읽고 그대로 진행해.
+```
+
+에이전트가 설치하고, 점검하고, 아래 두 가지를 물어본 뒤, 메시지가 실제로 들어가는 걸 보여 줘요.
+
+직접 할 때는 이렇게 해요.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/oesoll/peer/main/install.sh | sh
                                 # ~/.local/share/peer에 받고, ~/.local/bin/peer 링크, 훅, 에이전트 스킬
-peer install --accept-inbound   # 선택: 쉬는 Claude도 바로 받게(아래 설명)
+peer install --accept-inbound --codex-alias
+                                # 추천: 쉬는 Claude도 바로 받고, 평소 치는 `codex`가 받을 수 있는 세션으로 떠요
 peer doctor                     # 되는 것, 빠진 것, 채우는 명령
 ```
 
-Python 3.9 이상이 필요해요. `peer spawn`과 가까운 순 목록에는 tmux를 써요. Codex로 보내려면 `websocket-client`도 있어야 해요. 설치 뒤 Codex에서 `/hooks`로 새 훅을 한 번 신뢰해 주세요.
+Python 3.9 이상이면 돼요. tmux가 있으면 `peer spawn`과 가까운 순 목록도 써요. 설치 뒤 Codex에서 `/hooks`로 새 훅을 한 번 신뢰해 주세요.
+
+- `--accept-inbound`: 없으면 쉬는 Claude에게 보낸 메시지는 그 세션의 다음 턴까지 기다려요(아래 설명).
+- `--codex-alias`: 셸 설정에 `alias codex='peer run codex'`를 넣어요. Codex는 peer를 거쳐 띄운 세션만 받을 수 있는데, 이 별칭이 평소 치는 `codex`를 그 세션으로 만들어요. `codex exec`, `codex login` 같은 비대화형 명령은 그대로 Codex를 실행해요.
 
 이미 떠 있던 세션은 다음 턴부터 목록에 나타나요.
 
@@ -39,7 +53,7 @@ Python 3.9 이상이 필요해요. `peer spawn`과 가까운 순 목록에는 tm
 
 ```sh
 peer                               # 내 근처: 같은 tmux 세션 → 비슷한 폴더 → 최근에 말한 상대
-peer say 이름 "글"                  # delivered / queued(일하는 중, 다음 도구 호출 때) / held(사람 대기 중)
+peer say 이름 "글"                  # delivered, 아니면 queued/held와 무엇을 기다리는지, 고치는 법
 peer ask 이름 "질문"                # 최대 60초 기다렸다가 답을 출력
 peer read 이름 --last 2             # 화면 말고 엔진 대화 기록에서 마지막 답
 peer spawn reviewer --kind codex   # tmux에 띄우고 준비되면 돌아옴
@@ -73,7 +87,7 @@ Claude Code는 보낸 쪽이 같은 권한 모드로 도는 Claude 세션이라�
 ## 한계
 
 - Claude의 내장 받은편지함은 공개 API가 아니에요. peer는 관찰한 프로토콜(`peerProtocol: 1`)을 쓰고, 바뀌면 훅 경로로 물러나요. 그래도 Claude Code 업데이트 때 빠른 길이 깨질 수 있어요.
-- Codex는 `peer run codex`나 `peer spawn --kind codex`로 띄운 세션만 받아요. Claude보다 덜 다듬어졌어요.
+- Codex는 peer를 거쳐 띄운 세션만 받아요(`peer run codex`, `peer spawn --kind codex`, 또는 `--codex-alias`를 켠 `codex`). Claude보다 덜 다듬어졌어요.
 - 기기 사이에서는 받는 쪽이 보낸 쪽 기기 이름을 그대로 믿어요. ssh로 같은 사용자임은 이미 확인된 상태예요.
 - 하위 에이전트나 긴 셸처럼 뒤에서 도는 작업이 있으면 `idle`로 보일 수 있어요.
 

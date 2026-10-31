@@ -246,7 +246,8 @@ def main(argv):
   peer receipt HOST/ID               where a message stopped
   peer spawn NAME --kind claude|codex [--cwd DIR] [--host HOST] [-- ARGS]
   peer run codex [ARGS]              start Codex so peer can reach it
-  peer install [--accept-inbound]    hook into Claude Code and Codex
+  peer install [--accept-inbound] [--codex-alias]
+                                     hook into Claude Code and Codex (peer doctor explains both)
   peer doctor                        what works, what is missing, how to fix it
 
 Messages go through each engine's own input path, never your terminal:

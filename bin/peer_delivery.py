@@ -137,6 +137,15 @@ def codex_send(row, mail):
     return None
 
 
+# What a held message is waiting for, said so the sender knows whether to wait or act.
+HELD = {
+    'blocked': 'waiting on its user (an approval or a question); delivered once that is answered',
+    'gone': 'that session has ended; delivered if it is resumed',
+    'unknown': 'its state is unknown; retried as soon as it reports in',
+    'error': 'its engine reported an error; retried once it recovers',
+}
+
+
 def attempt(file):
     mail = read(file)
     if not mail:
@@ -148,7 +157,7 @@ def attempt(file):
         row = session(mail['recipient'])
         state = public(row)['state']
         if state in ('blocked', 'gone', 'unknown', 'error'):
-            update_receipt(mail['id'], stage='held', reason=state)
+            update_receipt(mail['id'], stage='held', reason=HELD.get(state, state))
             return
         try:
             if row['kind'] == 'codex' and row.get('codex_socket'):
@@ -166,11 +175,12 @@ def attempt(file):
                     update_receipt(mail['id'], stage='queued', route=None, reason='Claude inbox unreachable')
                 # No inbox route: the hook hands it over at the next tool call or turn end.
                 if state in ('working', 'waiting-on'):
-                    update_receipt(mail['id'], stage='queued', route='claude-hook', reason='next tool call or turn end')
+                    update_receipt(mail['id'], stage='queued', route='claude-hook', reason='lands at its next tool call or turn end')
                 else:
-                    update_receipt(mail['id'], stage='held', reason='idle; set crossSessionInbound to accept (peer doctor) or it waits for its next turn')
+                    update_receipt(mail['id'], stage='held', reason='idle Claude reads it on its next turn; to deliver at once: peer install --accept-inbound')
                 return
-            update_receipt(mail['id'], stage='held', reason='no input route; start Codex with `peer run codex` or `peer spawn`')
+            update_receipt(mail['id'], stage='held', reason='this Codex was not started through peer, so nothing can reach it; '
+                       'restart it with `peer run codex` (peer install --codex-alias makes plain `codex` do that)')
         except Exception as error:
             # Retrying an unacknowledged native send could duplicate work. Keep
             # the mailbox for diagnosis; only unsent connection failures retry.

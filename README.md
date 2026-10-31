@@ -27,14 +27,28 @@ You get one command to send, real states instead of screen-reading (`working`, `
 
 ## Install
 
+Paste this into Claude Code or Codex and let the agent do it:
+
+```
+Set up peer for me: curl -fsSL https://raw.githubusercontent.com/oesoll/peer/main/SETUP.md and follow it.
+```
+
+It installs peer, checks it, asks you the two choices below, and shows a message arriving.
+
+By hand:
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/oesoll/peer/main/install.sh | sh
                                 # clones to ~/.local/share/peer, links ~/.local/bin/peer, adds hooks and the agent skill
-peer install --accept-inbound   # optional: let idle Claude sessions take messages at once (see below)
+peer install --accept-inbound --codex-alias
+                                # recommended: idle Claude takes messages at once; plain `codex` starts reachable
 peer doctor                     # what works, what is missing, and the command that fixes it
 ```
 
-You need Python 3.9+, and tmux for `peer spawn` and nearby-first listing. Codex delivery needs `websocket-client` (`pip install --user websocket-client`). After install, Codex asks you once in `/hooks` to trust the new hooks.
+You need Python 3.9+ and nothing else; tmux adds `peer spawn` and nearby-first listing. After install, Codex asks you once in `/hooks` to trust the new hooks.
+
+- `--accept-inbound`: without it, a message to an idle Claude waits for that session's next turn (see below).
+- `--codex-alias`: adds `alias codex='peer run codex'` to your shell rc. Only Codex started through peer can receive; the alias makes your usual `codex` that one. `codex exec`, `codex login` and other non-interactive commands still run Codex directly.
 
 Sessions that were already running show up on their next turn.
 
@@ -44,7 +58,7 @@ Agents learn the commands from the bundled skill. To try it by hand:
 
 ```sh
 peer                               # who is near you: same tmux session, similar folders, recent contacts
-peer say NAME "text"               # delivered / queued (busy: next tool call) / held (waiting on its user)
+peer say NAME "text"               # delivered, or queued/held with what it waits for and how to fix it
 peer ask NAME "question"           # wait up to 60s for the reply
 peer read NAME --last 2            # their last answers, read from engine history, not the screen
 peer spawn reviewer --kind codex   # start one in a detached tmux session, return when ready
@@ -80,7 +94,7 @@ Claude Code delivers a cross-session message without asking only when it can vou
 ## Limits
 
 - Claude's cross-session inbox is not a public API. peer uses the protocol it observed (`peerProtocol: 1`) and falls back to hooks when that changes, but a Claude Code update can break the fast path.
-- Codex sessions are reachable only when started with `peer run codex` or `peer spawn --kind codex`. Codex support is newer and less tested than Claude support.
+- Codex sessions are reachable only when started through peer (`peer run codex`, `peer spawn --kind codex`, or plain `codex` with `--codex-alias`). Codex support is newer and less tested than Claude support.
 - Between machines, the receiving side trusts the origin name it is given. ssh has already proven you are the same user there.
 - A session doing background work (a subagent, a long shell) can show as `idle`.
 

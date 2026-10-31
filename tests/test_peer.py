@@ -298,5 +298,69 @@ class PeerTests(unittest.TestCase):
         args = ['-s', 'danger-full-access', '-c', 'model_reasoning_effort=high', '--enable', 'x', '--config=a=1', 'resume', 'abc']
         self.assertEqual(session.config_overrides(args), ['-c', 'model_reasoning_effort=high', '--enable', 'x', '--config=a=1'])
 
+    def test_run_codex_routes_only_session_commands_through_the_server(self):
+        loader = importlib.machinery.SourceFileLoader('peer_session2', str(BIN / 'peer-session'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        session = importlib.util.module_from_spec(spec); loader.exec_module(session)
+        with patch.object(session, 'codex_subcommands', return_value={'exec', 'e', 'login', 'resume', 'fork'}):
+            self.assertEqual(session.tui_args([], 's'), ['--remote', 'unix://s'])
+            self.assertEqual(session.tui_args(['fix the bug'], 's'), ['--remote', 'unix://s', 'fix the bug'])
+            self.assertEqual(session.tui_args(['-c', 'a=b', 'resume', '--last'], 's'), ['-c', 'a=b', 'resume', '--remote', 'unix://s', '--last'])
+            self.assertEqual(session.tui_args(['-m', 'resume'], 's'), ['--remote', 'unix://s', '-m', 'resume'])  # a model named resume
+            for passthrough in (['exec', 'hi'], ['-m', 'x', 'e', 'hi'], ['login'], ['--version']):
+                self.assertIsNone(session.tui_args(passthrough, 's'), passthrough)
+
+    def test_codex_alias_goes_in_and_out_of_the_shell_rc_cleanly(self):
+        home = self.root / 'home'; home.mkdir()
+        rc = home / '.zshrc'
+        rc.write_text('export A=1\n')
+        with patch.dict(os.environ, SHELL='/bin/zsh', ZDOTDIR=str(home)):
+            self.assertFalse(setup.alias_installed())
+            setup.set_alias()
+            setup.set_alias()  # idempotent
+            text = rc.read_text()
+            self.assertEqual(text.count(setup.ALIAS_START), 1)
+            self.assertIn("alias codex='peer run codex'", text)
+            self.assertTrue(text.startswith('export A=1\n'))
+            self.assertTrue(setup.alias_installed())
+            setup.set_alias(remove=True)
+            self.assertEqual(rc.read_text(), 'export A=1\n')
+
+    def test_websocket_client_speaks_rfc6455(self):
+        import base64, hashlib, socket, threading
+        client_sock, server_sock = socket.socketpair()
+        got = []
+
+        def server():
+            data = b''
+            while b'\r\n\r\n' not in data:
+                data += server_sock.recv(4096)
+            key = [l.split(b': ')[1] for l in data.split(b'\r\n') if l.lower().startswith(b'sec-websocket-key')][0]
+            accept = base64.b64encode(hashlib.sha1(key + t.WebSocket.GUID.encode()).digest())
+            server_sock.sendall(b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                                b'Sec-WebSocket-Accept: ' + accept + b'\r\n\r\n')
+            # one masked client frame in
+            head = server_sock.recv(2); n = head[1] & 0x7f
+            if n == 126: n = int.from_bytes(server_sock.recv(2), 'big')
+            mask = server_sock.recv(4); body = b''
+            while len(body) < n: body += server_sock.recv(n - len(body))
+            got.append(bytes(b ^ mask[i & 3] for i, b in enumerate(body)).decode())
+            big = ('x' * 70000).encode()
+            server_sock.sendall(bytes([0x89, 0]))                                    # ping, answered then skipped
+            server_sock.sendall(bytes([0x81, 127]) + len(big).to_bytes(8, 'big') + big)  # 64-bit length
+            server_sock.sendall(bytes([0x01, 3]) + b'{"a' + bytes([0x80, 4]) + b'":1}')  # fragmented
+            pong = server_sock.recv(2)
+            got.append(pong[0] & 0x0f)
+
+        thread = threading.Thread(target=server); thread.start()
+        ws = t.WebSocket(client_sock)
+        ws.send(json.dumps({'id': 1, 'method': 'initialize'}))
+        self.assertEqual(ws.recv(), 'x' * 70000)
+        self.assertEqual(json.loads(ws.recv()), {'a': 1})
+        thread.join(5)
+        self.assertEqual(json.loads(got[0])['method'], 'initialize')
+        self.assertEqual(got[1], 0xA)
+        ws.close(); server_sock.close()
+
 if __name__ == '__main__':
     unittest.main()

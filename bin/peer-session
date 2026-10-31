@@ -5,6 +5,7 @@ A Codex TUI keeps its app-server inside its own process, where nothing outside c
 This starts one private server for one TUI and attaches the TUI with --remote, so peer can start
 or steer turns and read the thread's state. The server belongs to that TUI alone, so restarting a
 shared daemon cannot cut it off, and it ends when the TUI exits."""
+import functools
 import os
 from pathlib import Path
 import signal
@@ -35,7 +36,67 @@ def config_overrides(args):
     return out
 
 
+# Subcommands that open a session TUI take --remote after their own name; every other subcommand
+# (exec, login, mcp, ...) is not a session peer could reach, so it runs Codex directly. That keeps
+# `alias codex='peer run codex'` (peer install --codex-alias) from changing anything but the TUI.
+SESSION_COMMANDS = {'resume', 'fork'}
+VALUE_OPTIONS = {'-c', '--config', '-m', '--model', '-p', '--profile', '-s', '--sandbox', '-a', '--ask-for-approval',
+                 '-C', '--cd', '-i', '--image', '--enable', '--disable', '--add-dir', '--remote', '--remote-auth-token-env',
+                 '--local-provider'}
+PASSTHROUGH_FLAGS = {'-h', '--help', '-V', '--version'}
+
+
+def first_word(args):
+    """(index, word) of the first argument that is not an option or an option's value."""
+    i = 0
+    while i < len(args):
+        if args[i] == '--':
+            return None, None
+        if args[i].startswith('-'):
+            i += 2 if args[i] in VALUE_OPTIONS else 1
+            continue
+        return i, args[i]
+    return None, None
+
+
+def tui_args(args, sock):
+    """Codex's own arguments with --remote placed where that command reads it, or None to run Codex
+    as is. A first word that is not a subcommand is the TUI's opening prompt."""
+    if PASSTHROUGH_FLAGS.intersection(args):
+        return None
+    at, word = first_word(args)
+    if word in SESSION_COMMANDS:
+        return args[:at + 1] + ['--remote', 'unix://' + sock] + args[at + 1:]
+    if word is not None and word in codex_subcommands():
+        return None
+    return ['--remote', 'unix://' + sock] + args
+
+
+@functools.lru_cache(maxsize=1)
+def codex_subcommands():
+    """Read from `codex --help` once, so a new subcommand passes through without a peer release.
+    A command line is indented two spaces; deeper lines continue the description above."""
+    try:
+        text = subprocess.run(launcher('codex') + ['--help'], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        text = ''
+    words, listing = set(), False
+    for line in text.splitlines():
+        if line.strip() == 'Commands:':
+            listing = True
+        elif listing and not line.strip():
+            break
+        elif listing:
+            if line.startswith('  ') and not line.startswith('   '):
+                words.add(line.split()[0])
+            words.update(a.strip() for a in line.partition('[aliases:')[2].rstrip(']').split(',') if a.strip())
+    return words or {'exec', 'e', 'review', 'login', 'logout', 'mcp', 'mcp-server', 'app-server', 'completion', 'apply', 'a',
+                     'sandbox', 'debug', 'cloud', 'features', 'help', 'update', 'doctor'}
+
+
 def main(args):
+    if tui_args(args, '') is None:
+        os.execvp(launcher('codex')[0], launcher('codex') + args)
     signal.signal(signal.SIGHUP, interrupted)
     signal.signal(signal.SIGTERM, interrupted)
     stopped = threading.Event()
@@ -55,7 +116,7 @@ def main(args):
                     sys.exit('peer: codex app-server exited during startup')
                 time.sleep(.1)
             threading.Thread(target=watch, args=(server, sock, stopped), daemon=True).start()
-            result = subprocess.run(launcher('codex') + ['--remote', 'unix://' + sock] + args, env=env)
+            result = subprocess.run(launcher('codex') + tui_args(args, sock), env=env)
         finally:
             stopped.set()
             server.terminate()

@@ -1,5 +1,7 @@
 """Codex app-server client and the ssh transport between machines."""
+import base64
 import concurrent.futures
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,19 +18,90 @@ class RPCError(Exception):
     pass
 
 
+class WebSocket:
+    """Just enough RFC 6455 for one local app-server on a Unix socket: the client handshake, masked
+    text frames out, text frames in (fragments joined), pings answered. Codex app-server sockets speak
+    HTTP Upgrade + WebSocket frames, not raw JSONL. Written here so Codex delivery needs nothing
+    beyond Python; a pip step was where new installs stalled (and PEP 668 Pythons refuse --user)."""
+    GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
+
+    def __init__(self, sock):
+        self.sock = sock
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall(('GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                      'Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n' % key).encode())
+        head = b''
+        while b'\r\n\r\n' not in head:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError('app-server closed the connection during the WebSocket handshake')
+            head += chunk
+        head, self.buffer = head.split(b'\r\n\r\n', 1)
+        status = head.split(b'\r\n', 1)[0].split()
+        accept = base64.b64encode(hashlib.sha1((key + self.GUID).encode()).digest())
+        if len(status) < 2 or status[1] != b'101' or accept not in head:
+            raise ConnectionError('app-server refused the WebSocket upgrade: ' + b' '.join(status).decode(errors='replace'))
+
+    def _read(self, n):
+        while len(self.buffer) < n:
+            chunk = self.sock.recv(max(4096, n - len(self.buffer)))
+            if not chunk:
+                raise ConnectionError('app-server closed the connection')
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:n], self.buffer[n:]
+        return data
+
+    def _frame(self, opcode, payload):
+        n = len(payload)
+        if n < 126:
+            head = bytes([0x80 | opcode, 0x80 | n])
+        elif n < 1 << 16:
+            head = bytes([0x80 | opcode, 0x80 | 126]) + n.to_bytes(2, 'big')
+        else:
+            head = bytes([0x80 | opcode, 0x80 | 127]) + n.to_bytes(8, 'big')
+        mask = os.urandom(4)
+        self.sock.sendall(head + mask + bytes(b ^ mask[i & 3] for i, b in enumerate(payload)))
+
+    def send(self, text):
+        self._frame(0x1, text.encode())
+
+    def recv(self):
+        parts = []
+        while True:
+            first, second = self._read(2)
+            opcode, n = first & 0x0F, second & 0x7F
+            if n == 126:
+                n = int.from_bytes(self._read(2), 'big')
+            elif n == 127:
+                n = int.from_bytes(self._read(8), 'big')
+            mask = self._read(4) if second & 0x80 else None
+            data = self._read(n)
+            if mask:
+                data = bytes(b ^ mask[i & 3] for i, b in enumerate(data))
+            if opcode == 0x9:
+                self._frame(0xA, data)
+            elif opcode == 0x8:
+                raise ConnectionError('app-server closed the connection')
+            elif opcode in (0x0, 0x1, 0x2):
+                parts.append(data)
+                if first & 0x80:
+                    return b''.join(parts).decode()
+
+    def close(self):
+        try:
+            self._frame(0x8, b'')
+        except OSError:
+            pass
+        self.sock.close()
+
+
 class CodexClient:
     def __init__(self, endpoint):
-        # Use the maintained WebSocket implementation; Codex Unix sockets speak
-        # HTTP Upgrade + WebSocket frames, not raw JSONL (proxy is byte-transparent).
-        try:
-            import websocket
-        except ImportError:
-            raise RPCError('install websocket-client for Codex app-server delivery')
         sock = socket.socket(socket.AF_UNIX)
         sock.settimeout(2)
         try:
             sock.connect(endpoint)
-            self.ws = websocket.create_connection('ws://localhost/', socket=sock, timeout=2)
+            self.ws = WebSocket(sock)
         except Exception:
             sock.close()
             raise
