@@ -28,8 +28,8 @@ You get one command to send, real states instead of screen-reading (`working`, `
 ## Install
 
 ```sh
-git clone https://github.com/oesoll/peer && cd peer
-./install.sh                    # links ~/.local/bin/peer, adds hooks, installs the agent skill
+curl -fsSL https://raw.githubusercontent.com/oesoll/peer/main/install.sh | sh
+                                # clones to ~/.local/share/peer, links ~/.local/bin/peer, adds hooks and the agent skill
 peer install --accept-inbound   # optional: let idle Claude sessions take messages at once (see below)
 peer doctor                     # what works, what is missing, and the command that fixes it
 ```

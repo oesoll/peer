@@ -23,8 +23,8 @@ peer는 터미널에 치지 않아요. 각 엔진이 원래 가진 입력 길로
 ## 설치
 
 ```sh
-git clone https://github.com/oesoll/peer && cd peer
-./install.sh                    # ~/.local/bin/peer 링크, 훅, 에이전트 스킬
+curl -fsSL https://raw.githubusercontent.com/oesoll/peer/main/install.sh | sh
+                                # ~/.local/share/peer에 받고, ~/.local/bin/peer 링크, 훅, 에이전트 스킬
 peer install --accept-inbound   # 선택: 쉬는 Claude도 바로 받게(아래 설명)
 peer doctor                     # 되는 것, 빠진 것, 채우는 명령
 ```
