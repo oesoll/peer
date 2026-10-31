@@ -1,6 +1,6 @@
 ---
 name: peer
-description: Use when you need to talk to another coding agent (Claude Code or Codex) running on this machine or another one, see what other agents are doing, wait for one, or start one — and whenever a `[from NAME@HOST]` line appears in your prompt (a colleague is messaging you). Provides the `peer` CLI.
+description: Use when you need to talk to another coding agent (Claude Code or Codex) running on this machine or another one, see what other agents are doing, wait for one, or start one — and whenever a message from NAME@HOST (a `[from NAME@HOST]` line, or Claude's "Message from @NAME@HOST") appears in your prompt (a colleague is messaging you). Provides the `peer` CLI.
 ---
 
 # peer
@@ -25,7 +25,7 @@ peer spawn NAME --kind claude|codex [--cwd DIR] [--host HOST] [-- ARGS]
 
 The end of the line says what it waits for. When that names a fix (`peer install --accept-inbound`, restarting Codex through `peer run codex`), it changes your user's setup: tell them, and let them decide.
 
-After `say`, stop. The reply arrives in your own context as `[from NAME@HOST] text`; answer with `peer say NAME "…"`. Use `ask` only when you cannot continue without the answer.
+After `say`, stop. The reply arrives in your own context, labelled with NAME@HOST (Claude shows "Message from @NAME@HOST"; elsewhere it reads `[from NAME@HOST] text`); answer with `peer say NAME "…"`. Use `ask` only when you cannot continue without the answer.
 
 States are facts, not guesses: `working`, `blocked(permission|question)` (waiting on their user), `idle` (no turn running — not the same as finished), `waiting-on(NAME)` (asking someone), `gone`, `unknown`.
 

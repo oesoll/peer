@@ -307,8 +307,11 @@ def inbox(ident):
     return sorted((root() / 'mail' / key(ident)).glob('*.json'), key=lambda p: p.stat().st_mtime)
 
 
-def envelope(mail):
-    return '[from ' + mail['sender']['name'] + '@' + mail['sender']['host'] + '] ' + mail['body'] + '\n[peer-id:' + mail['id'] + ']'
+def envelope(mail, labelled=True):
+    """The text a recipient sees. Routes where the engine names the sender itself (Claude's inbox shows
+    "Message from @NAME@HOST") pass labelled=False; a second [from ...] there only repeated the name."""
+    label = '[from ' + mail['sender']['name'] + '@' + mail['sender']['host'] + '] ' if labelled else ''
+    return label + mail['body'] + '\n[peer-id:' + mail['id'] + ']'
 
 
 def mark_delivered(mail, route, evidence):

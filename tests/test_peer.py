@@ -223,7 +223,10 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(got[0], {'type': 'auth', 'token': 'tok123'})
         content = got[1]['message']['content']
         self.assertIn('from-mode="bypass"', content)
-        self.assertIn('[from other@test] hello native', content)
+        # Claude names the sender itself from from-name; the body carries no second [from ...] label
+        self.assertIn('from-name="other@test"', content)
+        self.assertIn('>\nhello native\n[peer-id:', content)
+        self.assertNotIn('[from ', content)
         self.assertEqual(c.receipt(request['id'])['stage'], 'accepted')
         self.assertEqual(c.receipt(request['id'])['route'], 'claude-native')
 

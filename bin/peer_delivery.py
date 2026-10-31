@@ -91,7 +91,7 @@ def native_send(endpoint, mail):
     mode = sender.get('mode') if sender.get('mode') in ('bypass', 'default') else 'default'
     origin = html.escape('peer:' + sender['name'] + '@' + sender['host'], quote=True)
     content = ('<cross-session-message from="%s" from-name="%s" from-mode="%s">\n%s\n</cross-session-message>'
-               % (origin, html.escape(sender['name'], quote=True), mode, envelope(mail)))
+               % (origin, html.escape(sender['name'] + '@' + sender['host'], quote=True), mode, envelope(mail, labelled=False)))
     message = {'msgV': 1, 'msg_id': str(uuid.UUID(mail['id'] + '00000000')), 'type': 'user', 'priority': 'next',
                'message': {'role': 'user', 'content': content}, 'from': 'peer:' + sender['name'] + '@' + sender['host']}
     sock = socket.socket(socket.AF_UNIX)
