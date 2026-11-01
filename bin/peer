@@ -10,14 +10,16 @@ import secrets
 import subprocess
 import sys
 import time
-from peer_core import (alive, claim_name, host, key, lock, me, path, permission_mode, process, public, read,
+from peer_core import (alive, claim_name, claude_processes, revive, host, key, lock, me, path, permission_mode, process, public, read,
                        receipt, root, session, sessions, update_receipt, valid_name, write)
 from peer_delivery import receive, start_worker, work
 from peer_transport import BIN, hosts, inventory, remote
 
 
 def local_inventory():
-    rows = [public(row) for row in sessions()]
+    raw = sessions()
+    live = claude_processes() if any(r.get('kind') == 'claude' and not alive(r) for r in raw) else {}
+    rows = [public(revive(row, live)) for row in raw]
     sockets = {row.get('tmux_socket') for row in rows if str(row.get('target', '')).startswith('%')}
     for sock in sockets:
         if not sock:
@@ -48,11 +50,17 @@ def resolve(name):
     if '@' in name:
         name, owner = name.rsplit('@', 1)
         rows = [r for r in rows if r['host'] == owner]
-    matches = [r for r in rows if r['name'] == name]
+    matches = ([r for r in rows if r['name'] == name]
+               or [r for r in rows if name in (r['id'], r.get('session'))])
+    if len(matches) > 1:
+        # Stopped sessions keep their names for resume; prefer the sole live namesake.
+        live = [r for r in matches if r['state'] != 'gone']
+        if len(live) == 1:
+            return live[0]
     if len(matches) == 1:
         return matches[0]
     if matches:
-        raise ValueError('ambiguous name; use ' + ' or '.join(r['name'] + '@' + r['host'] for r in matches))
+        raise ValueError('ambiguous name; use ' + ' or '.join(r['id'] + '@' + r['host'] for r in matches))
     raise ValueError('peer not found: ' + name + '; run peer --all' + ('; unreachable: ' + '; '.join(errors) if errors else ''))
 
 
@@ -252,7 +260,8 @@ def main(argv):
 
 Messages go through each engine's own input path, never your terminal:
 a draft you are typing stays intact and an approval prompt never gets an Enter.
-NAME@HOST picks one when two machines use the same name. Add --json for scripts.''')
+NAME@HOST picks a machine. An exact id or session ID also works (see peer --all --json).
+One live namesake wins over stopped sessions. Add --json for scripts.''')
         return
     elif argv[0] == 'me':
         result = public(me())

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
-from peer_core import (alive, envelope, host, inbox, key, lock, mail_path, mark_delivered,
+from peer_core import (revive, alive, envelope, host, inbox, key, lock, mail_path, mark_delivered,
                        path, public, read, receipt, root, session, sessions, update_receipt, write)
 from peer_transport import BIN, CodexClient, RPCError
 
@@ -33,6 +33,7 @@ def receive(request, source_host):
     recipient = session(request['recipient'])
     if not recipient:
         raise ValueError('recipient session not registered; refresh peer list')
+    recipient = revive(recipient)
     if not isinstance(request['body'], str) or not 0 < len(request['body'].encode()) <= 64 * 1024:
         raise ValueError('message must contain 1–65536 UTF-8 bytes')
     with lock(path('delivery', ident)):
@@ -155,6 +156,11 @@ def attempt(file):
         if rec.get('stage') not in ('queued', 'held'):
             return
         row = session(mail['recipient'])
+        if not row:
+            update_receipt(mail['id'], stage='failed', reason='recipient session record removed')
+            Path(file).unlink(missing_ok=True)
+            return
+        row = revive(row)
         state = public(row)['state']
         if state in ('blocked', 'gone', 'unknown', 'error'):
             update_receipt(mail['id'], stage='held', reason=HELD.get(state, state))
@@ -238,6 +244,7 @@ def code_stamp():
 
 
 def work(once=False):
+    restart = False
     try:
         with lock(root() / 'worker', .005):
             from peer_core import process
@@ -246,7 +253,8 @@ def work(once=False):
             stamp = code_stamp()
             while True:
                 if code_stamp() != stamp:
-                    return  # deployed anew; the next receive starts a worker on the new code
+                    restart = any((root() / 'mail').glob('*/*.json'))
+                    return
                 for file in (root() / 'mail').glob('*/*.json'):
                     settle_accepted(file)
                 files = list((root() / 'mail').glob('*/*.json'))
@@ -267,3 +275,8 @@ def work(once=False):
                 time.sleep(.25)
     except TimeoutError:
         pass
+    finally:
+        # Release the worker lock before launching its replacement, so waiting mail
+        # continues after an update without needing another send to start a worker.
+        if restart:
+            start_worker()

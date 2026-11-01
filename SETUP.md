@@ -35,7 +35,9 @@ If Codex is installed, tell them to open `/hooks` once in a Codex session and tr
 
 Run `peer doctor` again, then `peer` (who is nearby) and `peer me` (this session's name). If they have another agent session open and agree, send it a one-line hello with `peer say NAME "hello from peer"` and show them the receipt line (`delivered · claude-native · ...`).
 
-Sessions that were already running appear on their next turn. The alias applies to shells opened after the install; a Codex that is already running needs a restart through `codex` (now aliased) or `peer run codex` before it can receive.
+Sessions that were already running appear on their next turn. An already registered Claude session can also be rediscovered after resume from its session files, before the next hook. This does not register sessions peer has never seen. The alias applies to shells opened after the install; a Codex that is already running needs a restart through `codex` (now aliased) or `peer run codex` before it can receive.
+
+If names collide, `peer --all --json` gives exact IDs usable with `peer say ID@HOST "hello from peer"`. A single live match takes precedence over stopped sessions with the same name. A `failed` receipt saying the recipient record was removed means that unsent message was discarded; refresh the list before choosing a recipient again. Pending mail survives a peer code update and is passed to a new worker automatically.
 
 ## Done
 

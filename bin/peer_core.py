@@ -150,6 +150,51 @@ def sessions():
     return [read(p) for p in sorted((root() / 'sessions').glob('*.json'))]
 
 
+def claude_processes():
+    """Find running sessions from Claude's per-process files, including resumed sessions."""
+    found = {}
+    folder = Path(os.environ.get('CLAUDE_CONFIG_DIR', str(Path.home() / '.claude'))) / 'sessions'
+    for file in folder.glob('*.json'):
+        try:
+            info = read(file)
+        except (OSError, ValueError):
+            continue  # the engine may be replacing a file while we read it
+        if not isinstance(info, dict):
+            continue
+        sid = info.get('sessionId')
+        pid = info.get('pid') or (int(file.stem) if file.stem.isdigit() else None)
+        if not isinstance(sid, str) or not isinstance(pid, int) or pid <= 0:
+            continue
+        proc = process(pid)
+        if proc and (proc['name'] == 'claude' or re.fullmatch(r'\d+\.\d+\.\d+', proc['name'])):
+            found[sid] = (proc, info.get('status'))
+    return found
+
+
+def revive(row, live=None):
+    """Refresh an already registered Claude session after resume, before its next hook."""
+    if row.get('kind') != 'claude' or alive(row):
+        return row
+    live = claude_processes() if live is None else live
+    hit = live.get(row.get('session'))
+    if not hit:
+        return row
+    proc, status = hit
+    file = path('sessions', row['id'])
+    with lock(file, .05):
+        current = read(file)
+        if not current or alive(current):
+            return current or row  # never recreate a record removed during discovery
+        if not alive({'process': proc}):
+            return current  # the discovered process ended or its PID was reused
+        # Only known runnable statuses allow delivery; a newer engine can add states.
+        state = {'busy': 'working', 'idle': 'idle'}.get(status, 'unknown')
+        now = time.time()
+        current.update(process=proc, state=state, reason='engine-file', since=now, observed=now)
+        write(file, current)
+        return current
+
+
 def public(row):
     fields = ('id', 'session', 'name', 'kind', 'host', 'cwd', 'title', 'target', 'state', 'reason', 'since', 'observed', 'tmux_socket')
     out = {k: row.get(k) for k in fields}

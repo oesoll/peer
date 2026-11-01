@@ -31,6 +31,10 @@ class PeerTests(unittest.TestCase):
         (self.root / 'config/hostname').write_text('test')
         self.env = patch.dict(os.environ, PEER_STATE=str(self.root / 'state'), PEER_CONFIG=str(self.root / 'config'), TMUX_PANE='%1')
         self.env.start()
+        for key in ('PEER_NAME', 'PEER_CODEX_SOCKET', 'TMUX'):
+            os.environ.pop(key, None)
+        os.environ['CLAUDE_CONFIG_DIR'] = str(self.root / 'claude')
+        os.environ['CODEX_HOME'] = str(self.root / 'codex')
         self.proc = c.process(os.getpid())
         self.agent = dict(self.proc, name='claude')
         self.chain = patch.object(c, 'ancestry', return_value=[self.agent]); self.chain.start()
@@ -102,6 +106,132 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(c.receipt(req['id'])['stage'], 'queued')
         c.prompt_receipts(row, event)
         self.assertEqual(c.receipt(req['id'])['stage'], 'delivered')
+
+    def dead_session(self, sid='resumed'):
+        row = self.observe(sid=sid)
+        row['process'] = dict(row['process'], start='ended')
+        c.write(c.path('sessions', row['id']), row)
+        return row
+
+    def engine_file(self, sid='resumed', status='idle'):
+        folder = self.root / 'claude/sessions'
+        folder.mkdir(parents=True, exist_ok=True)
+        file = folder / (str(os.getpid()) + '.json')
+        file.write_text(json.dumps(dict(sessionId=sid, status=status)))
+        return file
+
+    def test_resume_is_found_by_inventory_without_a_hook(self):
+        row = self.dead_session()
+        self.engine_file(status='busy')
+        with patch.object(c, 'process', return_value=self.agent):
+            back = cli.local_inventory()[0]
+        self.assertEqual(back['state'], 'working')
+        self.assertEqual(back['name'], row['name'])
+        self.assertEqual(back['reason'], 'engine-file')
+        self.assertEqual(c.session(row['id'])['process'], self.agent)
+        self.assertGreaterEqual(back['since'], row['since'])
+
+    def test_receive_and_worker_rediscover_resumed_recipient(self):
+        row = self.dead_session()
+        request, held = self.message(row)
+        self.assertEqual(held['stage'], 'held')
+        self.engine_file()
+        with patch.object(c, 'process', return_value=self.agent), \
+                patch.object(d, 'claude_native', return_value={'socket': 'fixture'}), \
+                patch.object(d, 'native_send', return_value=True) as send:
+            d.attempt(c.mail_path(row['id'], request['id']))
+            send.assert_called_once()
+            self.assertEqual(c.receipt(request['id'])['stage'], 'accepted')
+            c.write(c.path('sessions', row['id']), row)
+            _, fresh = self.message(row)
+            self.assertEqual(fresh['stage'], 'queued')
+
+    def test_resume_keeps_live_permission_state_and_unknown_status_held(self):
+        blocked = self.observe('PermissionRequest')
+        with patch.object(c, 'claude_processes') as scan:
+            self.assertEqual(c.revive(blocked), blocked)
+            scan.assert_not_called()
+        row = self.dead_session()
+        self.engine_file(status='future-status')
+        with patch.object(c, 'process', return_value=self.agent), patch.object(d, 'native_send') as send:
+            request, rec = self.message(row)
+            d.attempt(c.mail_path(row['id'], request['id']))
+            self.assertEqual(rec['stage'], 'held')
+            self.assertEqual(c.session(row['id'])['state'], 'unknown')
+            send.assert_not_called()
+
+    def test_discovery_ignores_invalid_files_and_unrelated_processes(self):
+        file = self.engine_file()
+        for content in ('{', '[]', '{"pid": [], "sessionId": "x"}', '{"pid": "bad", "sessionId": "x"}'):
+            file.write_text(content)
+            self.assertEqual(c.claude_processes(), {})
+        self.engine_file()
+        with patch.object(c, 'process', return_value=dict(self.agent, name='other-program')):
+            self.assertEqual(c.claude_processes(), {})
+        with patch.object(c, 'process', return_value=None):
+            self.assertEqual(c.claude_processes(), {})
+
+    def test_resume_does_not_recreate_deleted_record_or_reuse_changed_pid(self):
+        row = self.dead_session()
+        hit = {row['session']: (self.agent, 'idle')}
+        with patch.object(c, 'process', return_value=dict(self.agent, start='different-process')):
+            self.assertEqual(c.revive(row, hit), row)
+        c.path('sessions', row['id']).unlink()
+        c.revive(row, hit)
+        self.assertFalse(c.path('sessions', row['id']).exists())
+
+    def test_live_namesake_wins_and_exact_ids_resolve(self):
+        live = dict(id='claude:new', session='new', name='duplicate', host='test', state='idle')
+        gone = dict(live, id='claude:old', session='old', state='gone')
+        with patch.object(cli, 'all_peers', return_value=([gone, live], [])):
+            self.assertEqual(cli.resolve('duplicate'), live)
+            self.assertEqual(cli.resolve('old'), gone)
+            self.assertEqual(cli.resolve('claude:old@test'), gone)
+        other = dict(live, id='claude:second', session='second')
+        with patch.object(cli, 'all_peers', return_value=([live, other], [])):
+            with self.assertRaisesRegex(ValueError, 'claude:new@test.*claude:second@test'):
+                cli.resolve('duplicate')
+            self.assertEqual(cli.resolve('claude:second@test'), other)
+        other['host'] = 'server'
+        with patch.object(cli, 'all_peers', return_value=([live, other], [])):
+            self.assertEqual(cli.resolve('duplicate@server'), other)
+        named = dict(live, name='old')
+        with patch.object(cli, 'all_peers', return_value=([gone, named], [])):
+            self.assertEqual(cli.resolve('old'), named)  # names retain precedence over bare IDs
+
+    def test_mail_for_removed_recipient_fails_and_worker_continues(self):
+        row = self.observe(sid='removed')
+        request, _ = self.message(row)
+        other = self.observe('PermissionRequest', sid='kept')
+        pending, _ = self.message(other)
+        c.path('sessions', row['id']).unlink()
+        d.work(once=True)
+        rec = c.receipt(request['id'])
+        self.assertEqual(rec['stage'], 'failed')
+        self.assertEqual(rec['reason'], 'recipient session record removed')
+        self.assertNotIn('body', rec)
+        self.assertFalse(c.mail_path(row['id'], request['id']).exists())
+        self.assertEqual(c.receipt(pending['id'])['stage'], 'held')
+        self.assertTrue(c.mail_path(other['id'], pending['id']).exists())
+
+    def test_update_hands_waiting_mail_to_worker_after_unlock(self):
+        row = self.observe('PermissionRequest')
+        request, _ = self.message(row)
+        def replacement():
+            with c.lock(c.root() / 'worker', .005):
+                d.work(once=True)  # another worker cannot acquire the replacement's lock
+        with patch.object(d, 'code_stamp', side_effect=['old', 'new']), \
+                patch.object(d, 'start_worker', side_effect=replacement) as start:
+            d.work()
+            start.assert_called_once()
+        self.assertTrue(c.mail_path(row['id'], request['id']).exists())
+        self.assertEqual(c.receipt(request['id'])['stage'], 'held')
+
+    def test_update_without_mail_does_not_start_worker(self):
+        with patch.object(d, 'code_stamp', side_effect=['old', 'new']), \
+                patch.object(d, 'start_worker') as start:
+            d.work()
+            start.assert_not_called()
 
     def test_ask_waiting_and_reply_body_lifetime(self):
         row = self.observe()
