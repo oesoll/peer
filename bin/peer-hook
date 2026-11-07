@@ -3,7 +3,7 @@
 import argparse
 import json
 import sys
-from peer_core import hook_deliver, observe, prompt_receipts
+from peer_core import hook_deliver, observe, prompt_receipts, note_hook_failure
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--kind', choices=('claude', 'codex'), required=True)
@@ -16,5 +16,5 @@ try:
         output = hook_deliver(row, event)
         if output:
             print(json.dumps(output, ensure_ascii=False))
-except Exception:
-    pass  # A peer observation must never break an agent turn or disclose its prompt.
+except Exception as error:
+    note_hook_failure(error)  # A peer observation must never break an agent turn or disclose its prompt.

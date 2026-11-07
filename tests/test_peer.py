@@ -8,6 +8,7 @@ from pathlib import Path
 import secrets
 import sys
 import tempfile
+from types import SimpleNamespace
 import time
 import unittest
 from unittest.mock import patch
@@ -45,6 +46,26 @@ class PeerTests(unittest.TestCase):
 
     def observe(self, event='SessionStart', sid='abc', **values):
         return c.observe(dict(hook_event_name=event, session_id=sid, cwd='/project/demo', **values), 'claude')
+
+    def test_a_name_from_a_dot_folder_or_label_still_registers(self):
+        """Issue #1: a dot-named folder gave '.dotfiles-claude', valid_name refused it, the hook swallowed the error."""
+        def name_for(sid, cwd):
+            return c.observe(dict(hook_event_name='SessionStart', session_id=sid, cwd=cwd), 'claude')['name']
+        with patch.object(c, 'pane_label', return_value=None):
+            self.assertEqual(name_for('s1', '/home/me/.dotfiles'), 'dotfiles-claude')
+            self.assertEqual(name_for('s2', '/home/me/-.config.'), 'config-claude')
+            self.assertEqual(name_for('s3', '/home/me/...'), 'agent-claude')
+        with patch.dict(os.environ, PEER_NAME='.hidden lane'), patch.object(c, 'pane_label', return_value=None):
+            self.assertEqual(name_for('s4', '/project/demo'), 'hidden-lane')
+        with patch.object(c.subprocess, 'run', return_value=SimpleNamespace(stdout='.dots\treview\n')):
+            self.assertEqual(c.pane_label(), 'dots-review')
+        try:
+            raise ValueError('secret prompt text')
+        except ValueError as error:
+            c.note_hook_failure(error)
+        logged = (c.root() / 'hook-errors.log').read_text()
+        self.assertIn('ValueError', logged)
+        self.assertNotIn('secret', logged)
 
     def message(self, row, body='private payload', **values):
         request = dict(id=secrets.token_hex(12), recipient=row['id'], sender={'id':'codex:other', 'name':'other','host':'test'}, body=body, **values)

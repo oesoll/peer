@@ -136,6 +136,12 @@ def session_key(kind, sid):
     return kind + ':' + sid
 
 
+def clean_name(text):
+    """A usable name from a folder, pane label or PEER_NAME: valid_name wants a letter, digit or underscore first, so a
+    folder like ~/.dotfiles must not lead with its dot. None if nothing is left."""
+    return re.sub(r'[^\w.-]+', '-', text or '').strip('-.')[:64] or None
+
+
 def valid_name(name):
     if not re.fullmatch(r'[\w][\w.-]{0,63}', name, re.UNICODE):
         raise ValueError('use a name of 1–64 letters, digits, dots, hyphens or underscores')
@@ -234,7 +240,7 @@ def pane_label():
     session, _, label = out.partition('\t')
     if not label:
         return None
-    return re.sub(r'[^\w.-]+', '-', session + '-' + label).strip('-')[:64] or None
+    return clean_name(session + '-' + label)
 
 
 def permission_mode(pid):
@@ -290,6 +296,22 @@ def event_state(event):
             'StopFailure': ('error', 'turn-failed'), 'SessionEnd': ('gone', 'session-ended')}.get(kind)
 
 
+def note_hook_failure(error):
+    """A hook stays silent toward the agent, but its failure must not vanish: an agent that never registers otherwise
+    leaves no trace at all. Type and place only, never the event: it can hold the prompt."""
+    try:
+        tb = error.__traceback__
+        while tb and tb.tb_next:
+            tb = tb.tb_next
+        place = '%s:%d' % (Path(tb.tb_frame.f_code.co_filename).name, tb.tb_lineno) if tb else '?'
+        file = root() / 'hook-errors.log'
+        file.parent.mkdir(parents=True, exist_ok=True)
+        with open(file, 'a') as out:
+            out.write('%s %s %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), type(error).__name__, place))
+    except Exception:
+        pass
+
+
 def observe(event, kind):
     state = event_state(event)
     sid = event.get('session_id')
@@ -305,12 +327,12 @@ def observe(event, kind):
     with lock(file, .02):
         old = read(file)
         cwd = event.get('cwd') or os.getcwd()
-        base = re.sub(r'[^\w.-]+', '-', Path(cwd).name).strip('-') or 'agent'
+        base = clean_name(Path(cwd).name) or 'agent'
         name = old.get('name')
         # One look at the pane label per session; a name someone chose (peer name, PEER_NAME) stays.
         if not name or not (old.get('named') or old.get('label_checked')):
             label = None if os.environ.get('PEER_NAME') else pane_label()
-            preferred = os.environ.get('PEER_NAME') or label or base[:45] + '-' + kind
+            preferred = clean_name(os.environ.get('PEER_NAME')) or label or base[:45] + '-' + kind
             if not name or label:
                 name = claim_name(ident, preferred, rename=bool(name))
         now = time.time()
