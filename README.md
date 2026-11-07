@@ -69,6 +69,8 @@ peer name reviewer                 # rename the current session; the name follow
 
 Names are made from the tmux session and pane label (`tmux set -p @peer review` gives `work-review`), otherwise from the folder and engine. A message to an agent that is waiting on its user is held and delivered once it is free.
 
+If a recipient's turn fails after taking your message (a rate limit, an overload, an API error), peer tells the sender why, so an agent isn't left waiting for a reply that will never come. `peer` shows the reason next to `error`.
+
 If a stopped session and one live session share a name, the live one wins. You can also address an exact `id` (such as `claude:<session-id>`) or bare session ID from `peer --all --json`; append `@HOST` to select a machine. Multiple live matches remain ambiguous.
 
 An already registered Claude session is rediscovered after resume from Claude's session files, without waiting for its next hook. A session peer has never seen still needs a hook to register. If a recipient's peer record is removed, its unsent mail is discarded with a `failed` receipt instead of retrying forever. Updating peer also hands pending mail to a worker running the new code automatically.

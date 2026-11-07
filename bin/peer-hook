@@ -11,6 +11,9 @@ args = parser.parse_args()
 try:
     event = json.load(sys.stdin)
     row = observe(event, args.kind)
+    if row and event.get('hook_event_name') == 'StopFailure':
+        from peer_delivery import start_worker
+        start_worker()  # senders still waiting on this turn must hear why it ended
     if row:
         prompt_receipts(row, event)
         output = hook_deliver(row, event)

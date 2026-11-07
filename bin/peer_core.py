@@ -280,6 +280,18 @@ def claim_name(ident, preferred, explicit=False, rename=False):
         return chosen
 
 
+def failure_reason(event):
+    """Why Claude's turn ended in an API error (StopFailure): rate_limit, overloaded, billing_error, … and its detail."""
+    why = ' '.join(str(event.get(k) or '') for k in ('error', 'error_details')).strip()
+    return re.sub(r'\s+', ' ', why)[:300] or 'turn-failed'
+
+
+def record_turn_failure(row):
+    """The worker tells whoever was waiting on this agent (peer_delivery.notify_turn_failures)."""
+    write(path('turn-failures', row['id']), dict(recipient=row['id'], name=row.get('name'), reason=row.get('reason'),
+                                                 after=row.get('turn_ok_at') or 0, at=time.time()))
+
+
 def event_state(event):
     kind = event.get('hook_event_name')
     if kind == 'PermissionRequest':
@@ -293,7 +305,7 @@ def event_state(event):
     return {'SessionStart': ('idle', 'session-start'), 'UserPromptSubmit': ('working', 'prompt'),
             'PreToolUse': ('working', 'tool'), 'PostToolUse': ('working', 'tool'),
             'Stop': ('idle', 'turn-ended'), 'Interrupt': ('idle', 'interrupted'),
-            'StopFailure': ('error', 'turn-failed'), 'SessionEnd': ('gone', 'session-ended')}.get(kind)
+            'StopFailure': ('error', failure_reason(event)), 'SessionEnd': ('gone', 'session-ended')}.get(kind)
 
 
 def note_hook_failure(error):
@@ -343,6 +355,10 @@ def observe(event, kind):
                    codex_home=os.environ.get('CODEX_HOME', str(Path.home() / '.codex')),
                    codex_socket=os.environ.get('PEER_CODEX_SOCKET'), transcript=event.get('transcript_path'),
                    named=bool(old.get('named') or os.environ.get('PEER_NAME')), label_checked=True)
+        # A turn that ended well closes what was asked of it; a failed one tells those still waiting.
+        row['turn_ok_at'] = now if event.get('hook_event_name') == 'Stop' else old.get('turn_ok_at')
+        if event.get('hook_event_name') == 'StopFailure':
+            record_turn_failure(row)
         write(file, row)
     return row
 

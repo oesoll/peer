@@ -147,6 +147,8 @@ def list_peers(query='', show_all=False, as_json=False):
             state += '(' + row['waiting_on'] + ')'
         if state == 'blocked':
             state += '(' + (row.get('reason') or 'user') + ')'
+        if state == 'error' and row.get('reason') not in (None, 'app-server', 'turn-failed'):
+            state += '(' + clean(row['reason'], 70) + ')'
         age = str(max(0, int(time.time() - (row.get('since') or time.time())))) + 's'
         location = str(row.get('window', '-')) + '.' + str(row.get('pane', '-'))
         print('  ' + location + ' ' + name + '  ' + row['kind'] + '  ' + state + ' ' + age + '  ' + clean(short_path(row['cwd']), 60) + (' · ' + clean(row['title'], 50) if row.get('title') else ''))

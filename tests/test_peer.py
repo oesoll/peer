@@ -16,6 +16,7 @@ from unittest.mock import patch
 BIN = Path(__file__).resolve().parents[1] / 'bin'
 sys.path.insert(0, str(BIN))
 import peer_core as c
+import peer_codex
 import peer_delivery as d
 import peer_transport as t
 import peer_setup as setup
@@ -440,6 +441,60 @@ class PeerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'content conflict'):
                 d.receive(dict(request, body='something else'), 'test')
         self.worker.start()
+
+    def failing_setup(self):
+        row = self.observe('UserPromptSubmit', sid='worker')
+        request, rec = self.message(row)
+        c.update_receipt(request['id'], stage='delivered', delivered=time.time())
+        return row, request
+
+    def notices(self):
+        sent = []
+        with patch.object(d, 'receive', side_effect=lambda req, source: sent.append(req)):
+            d.notify_turn_failures()
+        return sent
+
+    def test_a_failed_turn_tells_whoever_was_waiting_once(self):
+        row, request = self.failing_setup()
+        failed = self.observe('StopFailure', sid='worker', error='rate_limit', error_details='resets 5pm')
+        self.assertEqual((failed['state'], failed['reason']), ('error', 'rate_limit resets 5pm'))
+        sent = self.notices()
+        self.assertEqual([m['recipient'] for m in sent], ['codex:other'])
+        self.assertIn('rate_limit resets 5pm', sent[0]['body'])
+        self.assertEqual(sent[0]['sender']['id'], 'service:peer')
+        self.assertEqual(c.receipt(request['id'])['turn_failed'], 'rate_limit resets 5pm')
+        self.assertEqual(self.notices(), [], 'one notice per failure')
+        self.observe('StopFailure', sid='worker', error='rate_limit')
+        self.assertEqual(self.notices(), [], 'a later failure does not repeat it for the same message')
+
+    def test_a_finished_turn_closes_what_it_was_asked(self):
+        row, request = self.failing_setup()
+        time.sleep(.01)
+        self.observe('Stop', sid='worker')
+        time.sleep(.01)
+        self.observe('StopFailure', sid='worker', error='overloaded')
+        self.assertEqual(self.notices(), [], 'that message was handled in the turn that ended well')
+
+    def test_failure_notices_do_not_chain_and_retry_when_the_sender_is_away(self):
+        row, request = self.failing_setup()
+        self.observe('StopFailure', sid='worker', error='rate_limit')
+        with patch.object(d, 'receive', side_effect=OSError('away')):
+            d.notify_turn_failures()
+        self.assertFalse(c.receipt(request['id']).get('turn_failed'))
+        self.assertEqual(len(self.notices()), 1, 'tried again next round')
+        # a notice from peer itself never produces another notice
+        other = self.observe('UserPromptSubmit', sid='w2')
+        notice = dict(id=secrets.token_hex(12), recipient=other['id'], body='x', sender=dict(id='service:peer', name='peer', host='test', mode='default'))
+        d.receive(notice, 'test')
+        c.update_receipt(notice['id'], stage='delivered', delivered=time.time())
+        self.observe('StopFailure', sid='w2', error='rate_limit')
+        self.assertEqual(self.notices(), [])
+
+    def test_codex_last_turn_outcome(self):
+        client = SimpleNamespace(call=lambda method, params: {'data': [{'status': 'failed', 'error': {'message': "You've hit  your usage limit."}}]})
+        self.assertEqual(peer_codex.last_turn(client, 'x'), (True, "You've hit your usage limit."))
+        client = SimpleNamespace(call=lambda method, params: {'data': [{'status': 'completed'}]})
+        self.assertEqual(peer_codex.last_turn(client, 'x'), (False, None))
 
     def test_accepted_without_evidence_is_settled(self):
         row = self.observe('Stop', sid='settle')

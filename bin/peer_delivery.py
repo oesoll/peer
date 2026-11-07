@@ -13,7 +13,7 @@ import time
 import uuid
 from peer_core import (revive, alive, envelope, host, inbox, key, lock, mail_path, mark_delivered,
                        path, public, read, receipt, root, session, sessions, update_receipt, write)
-from peer_transport import BIN, CodexClient, RPCError
+from peer_transport import BIN, CodexClient, RPCError, remote
 
 
 def start_worker():
@@ -193,7 +193,8 @@ def attempt(file):
         row = revive(row)
         state = public(row)['state']
         if state in ('blocked', 'gone', 'unknown', 'error'):
-            update_receipt(mail['id'], stage='held', reason=HELD.get(state, state))
+            why = public(row).get('reason') if state == 'error' else None
+            update_receipt(mail['id'], stage='held', reason=HELD.get(state, state) + (': ' + why if why else ''))
             return
         try:
             if row['kind'] == 'codex' and row.get('codex_socket'):
@@ -273,6 +274,50 @@ def code_stamp():
     return [p.stat().st_mtime for p in sorted(Path(__file__).parent.glob('peer*'))]
 
 
+NOTICE_WINDOW = 6 * 3600  # same horizon as MAIL_TTL: older requests are not waiting on this turn any more
+
+
+def notify_turn_failures():
+    """An agent's turn failed (rate limit, overload, a dead API call), at its start or halfway. Whoever gave it work
+    has no other way to learn that: `delivered` was true, and no reply will ever come. Each sender hears once, with the
+    reason."""
+    now = time.time()
+    for file in (root() / 'turn-failures').glob('*.json'):
+        failure = read(file)
+        since = max(failure.get('after') or 0, now - NOTICE_WINDOW)
+        senders = {}
+        for item in (root() / 'receipts').glob('*.json'):
+            rec = read(item)
+            sender = rec.get('sender') or {}
+            if rec.get('recipient') != failure.get('recipient') or rec.get('turn_failed') \
+                    or rec.get('stage') not in ('delivered', 'accepted', 'uncertain') \
+                    or (rec.get('delivered') or rec.get('updated') or 0) <= since \
+                    or str(sender.get('id', '')).startswith('service:'):
+                continue
+            senders.setdefault((sender['id'], sender['host']), []).append(rec['id'])
+        unreached = False
+        for (ident, owner), messages in senders.items():
+            body = ("%s's turn failed, so what you sent it was probably not handled and no reply is coming: %s"
+                    % (failure.get('name'), failure.get('reason')))
+            request = dict(op='receive', id=secrets.token_hex(12), recipient=ident, body=body,
+                           sender=dict(id='service:peer', name='peer', host=host(), mode='default'))
+            try:
+                if owner == host():
+                    receive(request, host())
+                else:
+                    remote(owner, request)
+            except Exception:  # that machine or session is away; a few more tries, then give up rather than linger
+                unreached = True
+                continue
+            for message in messages:
+                update_receipt(message, turn_failed=failure.get('reason'))
+        attempts = failure.get('attempts', 0) + 1
+        if unreached and attempts < 5:
+            write(file, dict(failure, attempts=attempts))
+        else:
+            Path(file).unlink(missing_ok=True)
+
+
 EVIDENCE_STAGES = ('accepted', 'uncertain', 'sending')
 RETRY_AFTER = 5  # seconds before mail that could not go (held, or waiting for a hook) is tried again
 
@@ -291,6 +336,7 @@ def work(once=False):
                 if code_stamp() != stamp:
                     restart = any((root() / 'mail').glob('*/*.json'))
                     return
+                notify_turn_failures()
                 files = list((root() / 'mail').glob('*/*.json'))
                 now = time.monotonic()
                 expecting = set()
