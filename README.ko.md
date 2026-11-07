@@ -2,6 +2,8 @@
 
 코딩 에이전트끼리 이름으로 말을 주고받게 해 주는 도구예요.
 
+https://github.com/user-attachments/assets/869f833c-ba4b-4f73-838f-fe8104e2a564
+
 ```
 $ peer say work-review "인증 리팩터링 끝났어, src/auth.ts 봐 줘"
 delivered · claude-native · laptop/3f9c…

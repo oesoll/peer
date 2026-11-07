@@ -2,6 +2,8 @@
 
 Let your coding agents talk to each other by name.
 
+https://github.com/user-attachments/assets/869f833c-ba4b-4f73-838f-fe8104e2a564
+
 ```
 $ peer
 work / main
