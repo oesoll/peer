@@ -392,6 +392,55 @@ class PeerTests(unittest.TestCase):
             (config / 'settings.json').write_text(json.dumps({'crossSessionInbound': 'accept'}))
             self.assertEqual(d.claude_native(row)['token'], 't')
 
+    def test_a_record_left_behind_by_its_process_uses_the_live_conversations_inbox(self):
+        # /clear or /resume: the same process goes on under a new conversation id.
+        old = self.observe('PostToolUse', sid='before')
+        live = self.observe('Stop', sid='real-sid')
+        self.assertEqual(old['process'], live['process'])
+        config = self.root / 'claude3'; (config / 'sessions').mkdir(parents=True)
+        pid = live['process']['pid']
+        (config / 'settings.json').write_text(json.dumps({'crossSessionInbound': 'accept'}))
+        (config / 'sessions' / ('%s.json' % pid)).write_text(json.dumps({'sessionId': 'real-sid', 'peerProtocol': 1, 'messagingSocketPath': '/tmp/x.sock'}))
+        (config / 'sessions' / ('%s.k.key' % pid)).write_text(json.dumps({'peerToken': 't'}))
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(config)):
+            self.assertIsNone(d.claude_native(old))
+            self.assertEqual(d.claude_native_of_process(old)['token'], 't')
+
+    def test_mail_not_delivered_for_hours_is_closed(self):
+        row = self.observe('PostToolUse', sid='busy')  # working: mail waits for its next hook
+        request, rec = self.message(row)
+        file = c.mail_path(row['id'], request['id'])
+        d.attempt(file)
+        self.assertTrue(file.exists())
+        c.write(file, dict(c.read(file), created=time.time() - d.MAIL_TTL - 1))
+        d.attempt(file)
+        self.assertFalse(file.exists())
+        self.assertEqual(c.receipt(request['id'])['stage'], 'failed')
+
+    def test_worker_reads_transcripts_only_for_mail_awaiting_evidence(self):
+        row = self.observe('PostToolUse', sid='waits', transcript_path=str(self.root / 't.jsonl'))
+        (self.root / 't.jsonl').write_text('x')
+        request, rec = self.message(row)
+        searched = []
+        with patch.object(d, 'transcript_evidence', side_effect=lambda r: searched.append(r['id'])), \
+             patch.object(d, 'lock', return_value=contextlib.nullcontext()):
+            d.work(once=True)
+            self.assertEqual(searched, [])  # queued for a hook: nothing to look for
+            c.update_receipt(request['id'], stage='accepted')
+            d.work(once=True)
+        self.assertEqual(searched, [row['id']])
+
+    def test_a_retried_message_is_the_same_message(self):
+        row = self.observe('PostToolUse', sid='retry')
+        request, rec = self.message(row)
+        self.worker.stop()
+        with patch.object(d, 'start_worker') as started:
+            self.assertEqual(d.receive(request, 'test')['id'], request['id'])
+            started.assert_called_once()  # still waiting: a worker that exited must pick it up again
+            with self.assertRaisesRegex(ValueError, 'content conflict'):
+                d.receive(dict(request, body='something else'), 'test')
+        self.worker.start()
+
     def test_accepted_without_evidence_is_settled(self):
         row = self.observe('Stop', sid='settle')
         request, rec = self.message(row)

@@ -1,4 +1,5 @@
 """Owner-side durable mailbox. Network runs here, never in peer-hook."""
+import hashlib
 import html
 import json
 import os
@@ -41,13 +42,17 @@ def receive(request, source_host):
         if previous:
             if previous['recipient'] != recipient['id'] or previous['sender'] != sender:
                 raise ValueError('message id collision')
+            if previous.get('body_hash') and previous['body_hash'] != hashlib.sha256(request['body'].encode()).hexdigest():
+                raise ValueError('message id content conflict; reuse an id only for the same message')
+            if previous.get('stage') in ('queued', 'held'):
+                start_worker()  # a retry of waiting mail: the worker may have exited since
             return previous  # transport retry is idempotent
         now = time.time()
         stage = 'held' if public(recipient)['state'] in ('blocked', 'gone', 'unknown') else 'queued'
         mail = dict(id=ident, recipient=recipient['id'], sender=sender, body=request['body'], created=now,
                     reply_to=request.get('reply_to'), ask=bool(request.get('ask')))
         rec = {k: v for k, v in mail.items() if k != 'body'}
-        rec.update(stage=stage, updated=now, route=None)
+        rec.update(stage=stage, updated=now, route=None, body_hash=hashlib.sha256(request['body'].encode()).hexdigest())
         write(mail_path(recipient['id'], ident), mail)
         write(path('receipts', ident), rec)
         # Replies to a live ask are consumed by its waiting CLI, never injected
@@ -83,6 +88,22 @@ def claude_native(row):
         token = read(key_file).get('peerToken')
         if token:
             return {'socket': meta['messagingSocketPath'], 'token': token}
+    return None
+
+
+def claude_native_of_process(row):
+    """The inbox of the conversation this record's process is in now. A record can outlive its session id while its
+    process runs on in another conversation (/clear, /resume). claude_native() refuses the old record, since the inbox
+    belongs to another conversation id, so its mail would wait for a hook that never comes. Same pid and same start
+    time mean the same running agent, so its live inbox is the right door."""
+    process = row.get('process')
+    if not process:
+        return None
+    for other in sessions():
+        if other['id'] != row['id'] and other.get('kind') == 'claude' and other.get('process') == process:
+            native = claude_native(other)
+            if native:
+                return native
     return None
 
 
@@ -147,6 +168,9 @@ HELD = {
 }
 
 
+MAIL_TTL = 6 * 3600  # undelivered this long: the moment has passed, so close it rather than inject it late
+
+
 def attempt(file):
     mail = read(file)
     if not mail:
@@ -154,6 +178,12 @@ def attempt(file):
     with lock(path('delivery', mail['id']), .005):
         rec = receipt(mail['id'])
         if rec.get('stage') not in ('queued', 'held'):
+            return
+        if time.time() - (mail.get('created') or time.time()) > MAIL_TTL:
+            # Days-old mail delivered at once would bury the agent in stale asks, and while it waits the worker
+            # never goes idle.
+            update_receipt(mail['id'], stage='failed', reason='not delivered within %d h' % (MAIL_TTL // 3600))
+            Path(file).unlink(missing_ok=True)
             return
         row = session(mail['recipient'])
         if not row:
@@ -172,7 +202,7 @@ def attempt(file):
                     update_receipt(mail['id'], stage=result[0], reason=result[1])
                 return
             if row['kind'] == 'claude':
-                native = claude_native(row)
+                native = claude_native(row) or claude_native_of_process(row)
                 if native:
                     update_receipt(mail['id'], stage='sending', route='claude-native')
                     if native_send(native, mail):
@@ -243,6 +273,10 @@ def code_stamp():
     return [p.stat().st_mtime for p in sorted(Path(__file__).parent.glob('peer*'))]
 
 
+EVIDENCE_STAGES = ('accepted', 'uncertain', 'sending')
+RETRY_AFTER = 5  # seconds before mail that could not go (held, or waiting for a hook) is tried again
+
+
 def work(once=False):
     restart = False
     try:
@@ -251,20 +285,42 @@ def work(once=False):
             write(root() / 'worker.json', process(os.getpid()))
             idle = time.monotonic()
             stamp = code_stamp()
+            due = {}   # mail file -> when to try it again; new mail goes at once, mail that could not go waits
+            seen = {}  # session -> transcript (size, mtime) when last searched for evidence
             while True:
                 if code_stamp() != stamp:
                     restart = any((root() / 'mail').glob('*/*.json'))
                     return
-                for file in (root() / 'mail').glob('*/*.json'):
-                    settle_accepted(file)
                 files = list((root() / 'mail').glob('*/*.json'))
+                now = time.monotonic()
+                expecting = set()
                 for file in files:
+                    if due.get(file, 0) > now:
+                        continue
+                    settle_accepted(file)
                     try:
                         attempt(file)
                     except (OSError, TimeoutError):
                         continue
-                for row in sessions():
-                    if row['kind'] == 'claude' and alive(row):
+                    mail = read(file)
+                    stage = receipt(mail['id']).get('stage') if mail else None
+                    if stage in EVIDENCE_STAGES:
+                        expecting.add(mail['recipient'])
+                    elif stage in ('queued', 'held'):
+                        due[file] = now + RETRY_AFTER
+                due = {f: t for f, t in due.items() if f in files}
+                # Only a recipient with mail awaiting its transcript line is read, and only when the transcript
+                # moved. Reading every live Claude's last 256 KB four times a second was most of the worker's CPU.
+                for rid in expecting:
+                    row = session(rid)
+                    if not row or row['kind'] != 'claude' or not row.get('transcript') or not alive(row):
+                        continue
+                    try:
+                        info = os.stat(row['transcript'])
+                    except OSError:
+                        continue
+                    if seen.get(rid) != (info.st_size, info.st_mtime):
+                        seen[rid] = (info.st_size, info.st_mtime)
                         transcript_evidence(row)
                 if once:
                     return
