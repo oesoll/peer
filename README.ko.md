@@ -2,7 +2,9 @@
 
 코딩 에이전트끼리 이름으로 말을 주고받게 해 주는 도구예요.
 
-https://github.com/user-attachments/assets/869f833c-ba4b-4f73-838f-fe8104e2a564
+<a href="assets/peer-demo-ko.mp4"><img src="assets/peer-demo.gif" width="800" alt="Claude Code가 peer say로 Codex에 리뷰를 맡기고, Codex가 버그를 찾고, Claude가 고치고, Codex가 승인한다. Codex 입력창에 쓰던 글은 그대로 남는다."></a>
+
+<sub>실제 Claude Code와 Codex, 38초. 누르면 전체 영상이 열려요.</sub>
 
 ```
 $ peer say work-review "인증 리팩터링 끝났어, src/auth.ts 봐 줘"

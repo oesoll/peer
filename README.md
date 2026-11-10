@@ -2,7 +2,9 @@
 
 Let your coding agents talk to each other by name.
 
-https://github.com/user-attachments/assets/869f833c-ba4b-4f73-838f-fe8104e2a564
+<a href="assets/peer-demo.mp4"><img src="assets/peer-demo.gif" width="800" alt="Claude Code asks Codex for a review with peer say; Codex finds the bug, Claude fixes it, Codex approves. The half-typed draft in Codex stays put."></a>
+
+<sub>Real Claude Code and Codex, 38 seconds. Click for the full video.</sub>
 
 ```
 $ peer
