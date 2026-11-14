@@ -8,18 +8,17 @@ import re
 import secrets
 import socket
 import subprocess
-import sys
 import time
 import uuid
-from peer_core import (revive, alive, envelope, host, inbox, key, lock, mail_path, mark_delivered,
-                       path, public, read, receipt, root, session, sessions, update_receipt, write)
+from peer_core import (asleep, python, revive, alive, envelope, host, inbox, key, lock, mail_path, mark_delivered,
+                       path, public, read, receipt, root, session, sessions, sm, update_receipt, write)
 from peer_transport import BIN, CodexClient, RPCError, remote
 
 
 def start_worker():
     # One flock-protected worker per state directory; no service installation.
     # Spawn is outside the hook. The winner stays until its mailboxes are empty.
-    subprocess.Popen([sys.executable, str(BIN / 'peer'), '_work'], stdin=subprocess.DEVNULL,
+    subprocess.Popen([python(), str(BIN / 'peer'), '_work'], stdin=subprocess.DEVNULL,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                      start_new_session=True)
 
@@ -159,6 +158,49 @@ def codex_send(row, mail):
     return None
 
 
+def omo_deliver(row, mail):
+    """OmO takes mail through its peer extension (peer-omo.js): one JSON line in, one out. The extension hands the text
+    to the session as user input, as a steer while a turn runs (after its tool calls) or as a new turn when idle."""
+    sock = row.get('omo_socket')
+    if not sock or not Path(sock).exists():
+        update_receipt(mail['id'], stage='held', reason='OmO session without the peer extension; start it through peer-session')
+        return
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        conn.settimeout(5)
+        try:
+            conn.connect(sock)
+        except OSError:
+            update_receipt(mail['id'], stage='held', reason='OmO peer socket did not answer')
+            return
+        update_receipt(mail['id'], stage='sending', route='omo-socket')
+        conn.sendall((json.dumps({'id': mail['id'], 'text': envelope(mail)}, ensure_ascii=False) + '\n').encode())
+        data = b''
+        while not data.endswith(b'\n'):
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    reply = json.loads(data or b'{}')
+    if reply.get('ok'):
+        mark_delivered(mail, 'omo-' + str(reply.get('mode') or 'start'), 'OmO took it as user input')
+    else:
+        update_receipt(mail['id'], stage='held', reason='OmO refused: ' + str(reply.get('error') or 'no reply')[:200])
+
+
+def wake(row):
+    """Ask sm to wake a session it put to sleep (`sm-session wake NAME` resumes the same engine session), once;
+    the next attempt delivers."""
+    layer = sm()
+    if not layer:
+        return
+    mark = root() / 'waking' / (key(row['id']) + '.json')
+    if time.time() - read(mark).get('at', 0) < 90:
+        return  # already waking
+    write(mark, dict(at=time.time(), name=row['name']))
+    subprocess.Popen([python(), str(Path(layer.BIN) / 'sm-session'), 'wake', row['name']], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+
+
 # What a held message is waiting for, said so the sender knows whether to wait or act.
 HELD = {
     'blocked': 'waiting on its user (an approval or a question); delivered once that is answered',
@@ -190,13 +232,20 @@ def attempt(file):
             update_receipt(mail['id'], stage='failed', reason='recipient session record removed')
             Path(file).unlink(missing_ok=True)
             return
-        row = revive(row)
+        row = revive(row)  # resumed without a hook yet: still deliverable
+        if asleep(row):
+            wake(row)
+            update_receipt(mail['id'], stage='queued', reason='waking the session')
+            return
         state = public(row)['state']
         if state in ('blocked', 'gone', 'unknown', 'error'):
             why = public(row).get('reason') if state == 'error' else None
             update_receipt(mail['id'], stage='held', reason=HELD.get(state, state) + (': ' + why if why else ''))
             return
         try:
+            if row['kind'] == 'omo':
+                omo_deliver(row, mail)
+                return
             if row['kind'] == 'codex' and row.get('codex_socket'):
                 result = codex_send(row, mail)
                 if result:

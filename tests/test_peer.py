@@ -33,17 +33,30 @@ class PeerTests(unittest.TestCase):
         (self.root / 'config/hostname').write_text('test')
         self.env = patch.dict(os.environ, PEER_STATE=str(self.root / 'state'), PEER_CONFIG=str(self.root / 'config'), TMUX_PANE='%1')
         self.env.start()
-        for key in ('PEER_NAME', 'PEER_CODEX_SOCKET', 'TMUX'):
+        # The suite may itself run inside an sm session or a Fine tab; that identity must not leak into the fixtures.
+        for key in ('PEER_NAME', 'PEER_CODEX_SOCKET', 'TMUX', 'PEER_VISIBLE', 'PEER_PARENT', 'PEER_HOLD_SOCK',
+                    'SM_PANE_ID', 'SM_WORKSPACE', 'SM_STATE', 'FINE_TAB_ID'):
             os.environ.pop(key, None)
+        os.environ['FINE_HOME'] = str(self.root / 'fine-home')  # no Fine here unless a test opens one
         os.environ['CLAUDE_CONFIG_DIR'] = str(self.root / 'claude')
         os.environ['CODEX_HOME'] = str(self.root / 'codex')
         self.proc = c.process(os.getpid())
         self.agent = dict(self.proc, name='claude')
         self.chain = patch.object(c, 'ancestry', return_value=[self.agent]); self.chain.start()
         self.worker = patch.object(d, 'start_worker'); self.worker.start()
+        # Never the session layer of the machine running the tests; tests that need sm bring a fake one.
+        self.no_sm = patch.object(c, 'sm', return_value=None); self.no_sm.start()
 
     def tearDown(self):
-        self.worker.stop(); self.chain.stop(); self.env.stop(); self.temp.cleanup()
+        self.no_sm.stop(); self.worker.stop(); self.chain.stop(); self.env.stop(); self.temp.cleanup()
+
+    def fake_sm(self):
+        """sm's records in a temp folder, the way sm_session keeps them: one JSON file per session name."""
+        folder = self.root / 'sm'
+        (folder / 'sessions').mkdir(parents=True, exist_ok=True)
+        layer = SimpleNamespace(BIN=str(self.root / 'sm-bin'), read=c.read,
+                                entry_path=lambda name: folder / 'sessions' / (name + '.json'))
+        return folder, layer
 
     def observe(self, event='SessionStart', sid='abc', **values):
         return c.observe(dict(hook_event_name=event, session_id=sid, cwd='/project/demo', **values), 'claude')
@@ -620,5 +633,153 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(got[1], 0xA)
         ws.close(); server_sock.close()
 
+
+    def test_hold_targets_and_fields(self):
+        def held(name):  # a real holder: this test process stands in as the agent's ancestor
+            (self.root / (name + '.json')).write_text(json.dumps(dict(holder=self.proc['pid'])))
+            return str(self.root / (name + '.sock'))
+        self.chain.stop()
+        self.chain = patch.object(c, 'ancestry', return_value=[self.agent, self.proc]); self.chain.start()
+        a, b = held('1a2b'), held('9f9f')
+        with patch.dict(os.environ, {'SM_PANE_ID': 'ABC-1', 'PEER_HOLD_SOCK': a}):
+            del os.environ['TMUX_PANE']
+            row = c.public(self.observe())
+            self.assertEqual(row['target'], 'sm:abc-1')
+            self.assertTrue(row['visible'])
+            self.assertEqual(row['hold'], a)
+        with patch.dict(os.environ, {'PEER_HOLD_SOCK': b, 'PEER_PARENT': 'laptop/claude:lead'}):
+            del os.environ['TMUX_PANE']
+            row = c.public(self.observe(sid='lane'))
+            self.assertEqual(row['target'], 'hold:9f9f')
+            self.assertFalse(row['visible'])
+            self.assertEqual(row['parent'], 'laptop/claude:lead')
+        self.assertEqual(c.public(self.observe(sid='pane'))['target'], '%1')  # a tmux pane still wins
+        self.assertTrue(c.public(c.session('claude:pane'))['visible'])  # no holder: a terminal someone sees
+
+    def test_sm_name_wins_over_a_picked_up_name(self):
+        first = self.observe()  # registered on its own (no PEER_NAME), e.g. its last hook in a plain terminal
+        self.assertEqual(first['name'], 'demo-claude')
+        with patch.dict(os.environ, PEER_NAME='picked'):
+            self.assertEqual(self.observe()['name'], 'picked')
+        cli_row = c.session(first['id']); cli_row['chosen'] = True; c.write(c.path('sessions', first['id']), cli_row)
+        with patch.dict(os.environ, PEER_NAME='other'):
+            self.assertEqual(self.observe()['name'], 'picked')  # a name chosen with `peer name` stays
+
+    def test_peer_name_is_kept_by_hooks_and_the_codex_watch(self):
+        row = self.observe()
+        with patch.object(cli, 'me', return_value=row), contextlib.redirect_stdout(io.StringIO()):
+            cli.main(['name', 'chosen-one'])
+        self.assertTrue(c.session(row['id'])['chosen'])
+        with patch.dict(os.environ, PEER_NAME='from-sm'):
+            self.assertEqual(self.observe()['name'], 'chosen-one')
+
+    def test_sm_reuses_a_closed_sessions_name(self):
+        with patch.dict(os.environ, PEER_NAME='lane'):
+            old = self.observe(sid='old')
+        c.write(c.path('sessions', old['id']), dict(old, process=dict(old['process'], start=[0, 0])))
+        folder, layer = self.fake_sm()
+        (folder / 'sessions/lane.json').write_text(json.dumps(dict(name='lane', session='new')))
+        with patch.object(c, 'sm', return_value=layer), patch.dict(os.environ, PEER_NAME='lane'):
+            self.assertEqual(self.observe(sid='new')['name'], 'lane')
+            self.assertEqual(c.session(old['id'])['name'], 'lane-2')
+            # a live holder keeps it: sm's record alone does not take a name from a running session
+            (folder / 'sessions/busy.json').write_text(json.dumps(dict(name='busy', session='third')))
+            with patch.dict(os.environ, PEER_NAME='busy'):
+                self.observe(sid='live')
+                self.assertEqual(self.observe(sid='third')['name'], 'busy-2')
+
+    def test_fine_tabs_get_their_titles_as_names(self):
+        self.engine_file(sid='tabsid')
+        old = self.observe(sid='autoname')  # registered by the hook under a folder name
+        self.assertEqual(old['name'], 'demo-claude')
+        tabs = [dict(id='AAAAAAAA-0000-0000-0000-000000000001', name='Trip planning', harness='claude', sessionId='tabsid', running=True),
+                dict(id='AAAAAAAA-0000-0000-0000-000000000002', name='리뷰 담당', harness='claude', sessionId='autoname', running=True)]
+        with patch.object(c, 'process', return_value=self.agent):
+            c.adopt_fine_tabs(tabs)
+            new = c.session('claude:tabsid')
+            self.assertEqual((new['name'], new['title'], new['target']), ('Trip-planning', 'Trip planning', 'fine:aaaaaaaa-0000-0000-0000-000000000001'))
+            self.assertEqual(c.public(new)['state'], 'idle')
+        self.assertEqual(c.session(old['id'])['name'], '리뷰-담당')
+        tabs[1]['name'] = 'Another title'
+        c.adopt_fine_tabs(tabs, live={})
+        self.assertEqual(c.session(old['id'])['name'], '리뷰-담당')  # renamed once; a name others use stays
+
+    def test_identity_inherited_through_an_app_is_dropped(self):
+        (self.root / 'h1.json').write_text(json.dumps(dict(holder=999999)))  # another agent's holder, not our ancestor
+        inherited = {'PEER_NAME': 'someone-else', 'PEER_HOLD_SOCK': str(self.root / 'h1.sock'), 'PEER_VISIBLE': '1'}
+        with patch.dict(os.environ, inherited):
+            row = self.observe(sid='tabbed')
+        self.assertEqual(row['name'], 'demo-claude')
+        self.assertIsNone(row['hold'])
+        (self.root / 'h2.json').write_text(json.dumps(dict(holder=self.agent['pid'])))  # our own holder: an ancestor
+        with patch.dict(os.environ, {'PEER_NAME': 'real-lane', 'PEER_HOLD_SOCK': str(self.root / 'h2.sock')}):
+            self.assertEqual(self.observe(sid='held')['name'], 'real-lane')
+        with patch.dict(os.environ, {'PEER_NAME': 'someone-else', 'FINE_TAB_ID': 'aaaaaaaa-0000-0000-0000-000000000009',
+                                     'SM_PANE_ID': 'p-x'}):
+            del os.environ['TMUX_PANE']
+            row = self.observe(sid='fine-tab')
+        self.assertEqual((row['name'], row['target']), ('demo-claude-2', 'fine:aaaaaaaa-0000-0000-0000-000000000009'))
+
+    def test_fine_tab_on_sm_keeps_its_sm_name_and_answers_to_its_title(self):
+        held = self.observe(sid='finesm')
+        row = c.session(held['id']); row.update(name='fine-718a8b4e', hold='/s/x.sock'); c.write(c.path('sessions', held['id']), row)
+        c.adopt_fine_tabs([dict(id='718A8B4E-0000-0000-0000-000000000000', name='Trip planning', harness='claude',
+                                sessionId='finesm', running=True)], live={})
+        after = c.session(held['id'])
+        self.assertEqual((after['name'], after['title']), ('fine-718a8b4e', 'Trip planning'))
+        with patch.object(cli, 'all_peers', return_value=([c.public(after)], [])):
+            self.assertEqual(cli.resolve('Trip-planning')['id'], held['id'])
+
+    def test_a_sleeping_session_looks_idle_and_mail_wakes_it(self):
+        row = self.observe(sid='sleeper')
+        folder, layer = self.fake_sm()
+        c.write(c.path('sessions', row['id']), dict(row, hold='/x/s.sock', process=dict(row['process'], start=[0, 0])))
+        (folder / 'sessions' / (row['name'] + '.json')).write_text(json.dumps(dict(name=row['name'], slept=1)))
+        with patch.object(c, 'sm', return_value=layer), patch.object(d, 'sm', return_value=layer):
+            state = c.public(c.session(row['id']))
+            self.assertEqual((state['state'], state['reason']), ('idle', 'asleep'))
+            request, rec = self.message(c.session(row['id']))
+            mail = c.mail_path(row['id'], request['id'])
+            with patch.object(d.subprocess, 'Popen') as popen:
+                d.attempt(mail)
+                d.attempt(mail)  # a second try while it wakes does not start another
+            self.assertEqual(popen.call_count, 1)
+            self.assertEqual(popen.call_args[0][0][-3:], [str(Path(layer.BIN) / 'sm-session'), 'wake', row['name']])
+            self.assertEqual(c.receipt(request['id'])['reason'], 'waking the session')
+        # without sm there is no sleep: a session whose process ended is gone
+        self.assertEqual(c.public(c.session(row['id']))['state'], 'gone')
+
+    def test_omo_registers_and_takes_mail_on_its_socket(self):
+        import socket as sk, threading
+        self.agent['name'] = 'bun'   # OmO's RPC host is the agent process
+        short = tempfile.mkdtemp(prefix='po-', dir='/tmp')  # macOS sun_path is 104 bytes
+        self.addCleanup(lambda: __import__('shutil').rmtree(short, ignore_errors=True))
+        sock = short + '/o.sock'
+        got = []
+        server = sk.socket(sk.AF_UNIX, sk.SOCK_STREAM); server.bind(sock); server.listen(1)
+        def serve():
+            conn, _ = server.accept()
+            line = b''
+            while not line.endswith(b'\n'):
+                line += conn.recv(4096)
+            got.append(json.loads(line))
+            conn.sendall(b'{"ok": true, "mode": "start"}\n'); conn.close()
+        thread = threading.Thread(target=serve); thread.start()
+        row = c.observe(dict(hook_event_name='SessionStart', session_id='omo1', cwd='/project/demo', omo_socket=sock), 'omo')
+        self.assertEqual((row['kind'], row['state'], row['omo_socket']), ('omo', 'idle', sock))
+        self.assertEqual(row['name'], 'demo-omo')
+        self.assertEqual(cli.delivery_route(row), 'omo-socket')
+        req, _ = self.message(row)
+        d.attempt(c.mail_path(row['id'], req['id']))
+        thread.join(5); server.close()
+        rec = c.receipt(req['id'])
+        self.assertEqual((rec['stage'], rec['route']), ('delivered', 'omo-start'))
+        self.assertIn('private payload', got[0]['text'])
+        self.assertEqual(got[0]['id'], req['id'])
+        # the socket is gone (OmO ended without its shutdown event): held, saying why, never lost
+        os.unlink(sock)
+        req, _ = self.message(row)
+        d.attempt(c.mail_path(row['id'], req['id']))
+        self.assertEqual(c.receipt(req['id'])['stage'], 'held')
 if __name__ == '__main__':
     unittest.main()

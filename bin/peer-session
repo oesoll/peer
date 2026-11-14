@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Run Codex with an app-server peer can reach: `peer run codex [codex args]`.
+"""Run an agent so peer can reach it: `peer run codex [codex args]`, and the launcher behind peer spawn and sm.
 
 A Codex TUI keeps its app-server inside its own process, where nothing outside can talk to it.
 This starts one private server for one TUI and attaches the TUI with --remote, so peer can start
 or steer turns and read the thread's state. The server belongs to that TUI alone, so restarting a
-shared daemon cannot cut it off, and it ends when the TUI exits."""
+shared daemon cannot cut it off, and it ends when the TUI exits.
+
+Claude needs no server (its hooks and inbox are enough) and OmO takes mail through peer-omo.js; for
+them this only puts peer on PATH and passes the session's identity on."""
 import functools
+import json
 import os
 from pathlib import Path
 import signal
@@ -15,7 +19,8 @@ import tempfile
 import threading
 import time
 from peer_codex import watch
-from peer_core import launcher
+from peer_core import config, launcher, root
+from peer_transport import BIN
 
 
 def interrupted(signum, frame):
@@ -94,6 +99,19 @@ def codex_subcommands():
                      'sandbox', 'debug', 'cloud', 'features', 'help', 'update', 'doctor'}
 
 
+def agent_env():
+    """This environment, marked as launched by peer (a wrapper that hands interactive starts to peer-session
+    must not do it again), with peer on PATH: an agent started from an app with a bare PATH must still be
+    able to run peer. Appended, so nothing the caller chose is shadowed."""
+    env = dict(os.environ, PEER_LAUNCHED='1')
+    path = env.get('PATH', '').split(':')
+    for folder in (str(BIN), str(Path.home() / '.local/bin')):
+        if folder not in path and Path(folder).is_dir():
+            path.append(folder)
+    env['PATH'] = ':'.join(p for p in path if p)
+    return env
+
+
 def main(args):
     if tui_args(args, '') is None:
         os.execvp(launcher('codex')[0], launcher('codex') + args)
@@ -104,7 +122,7 @@ def main(args):
     # /tmp keeps the socket path under macOS's 104-byte limit; a longer one fails to bind.
     with tempfile.TemporaryDirectory(prefix='peer-codex-', dir='/tmp') as temp:
         sock = str(Path(temp) / 'c.sock')
-        env = dict(os.environ, PEER_CODEX_SOCKET=sock)
+        env = dict(agent_env(), PEER_CODEX_SOCKET=sock)
         server = subprocess.Popen([os.environ.get('PEER_CODEX_BIN', 'codex'), 'app-server', '--listen', 'unix://' + sock]
                                   + config_overrides(args),
                                   env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -128,7 +146,28 @@ def main(args):
     return result.returncode
 
 
+def run_claude(args):
+    return subprocess.run(launcher('claude') + args, env=agent_env()).returncode
+
+
+def run_omo(args):
+    """OmO runs the session in an RPC host that receives only OMO_*/SENPI_*/PI_* and a few basics, so the
+    identity peer-omo.js needs travels packed into one OMO_ variable. Without it the extension stays off."""
+    env = agent_env()
+    keys = ('PEER_NAME', 'PEER_HOLD_SOCK', 'PEER_PARENT', 'PEER_VISIBLE', 'SM_PANE_ID', 'SM_WORKSPACE')
+    identity = {k: env[k] for k in keys if env.get(k)}
+    identity.update(PEER_BIN=str(BIN), PEER_STATE=str(root()), PEER_CONFIG=str(config()))
+    env['OMO_PEER_IDENTITY'] = json.dumps(identity)
+    return subprocess.run(launcher('omo') + args, env=env).returncode
+
+
 if __name__ == '__main__':
-    if sys.argv[1:2] != ['codex']:
-        sys.exit('usage: peer run codex [codex args]  (Claude needs no launcher)')
-    sys.exit(main(sys.argv[2:]))
+    run = {'codex': main, 'claude': run_claude, 'omo': run_omo}.get(sys.argv[1] if len(sys.argv) > 1 else '')
+    if not run:
+        sys.exit('usage: peer run codex [codex args]')
+    signal.signal(signal.SIGHUP, interrupted)
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        sys.exit(run(sys.argv[2:]))
+    except ValueError as error:
+        sys.exit('peer: ' + str(error))

@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 import time
-from peer_core import claim_name, host, pane_label, lock, path, process, read, record_turn_failure, session_key, target, write
+from peer_core import claim_name, hold_fields, host, pane_label, lock, path, process, read, record_turn_failure, session_key, target, write
 from peer_transport import CodexClient
 
 
@@ -54,7 +54,10 @@ def watch(server, endpoint, stopped):
                                        reason=','.join(flags) or why or (previous.get('reason') if state == previous.get('state') == 'error' else None) or 'app-server',
                                        since=previous.get('since', now) if previous.get('state') == state else now,
                                        observed=now, codex_socket=endpoint, codex_home=os.environ.get('CODEX_HOME', str(Path.home()/'.codex')),
-                                       tmux_socket=os.environ.get('TMUX','').split(',')[0])
+                                       tmux_socket=os.environ.get('TMUX','').split(',')[0], **hold_fields())
+                            # This row is rewritten every 0.3 s. Losing `chosen` let the next hook put PEER_NAME back
+                            # over a name set with `peer name`.
+                            row.update({k: previous[k] for k in ('named', 'chosen', 'fine_named') if previous.get(k)})
                             write(file, row)
                             if failed:
                                 record_turn_failure(row)

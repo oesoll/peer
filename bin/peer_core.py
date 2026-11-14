@@ -2,11 +2,13 @@
 import contextlib
 import ctypes
 import fcntl
+import functools
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
 import struct
 import subprocess
@@ -127,11 +129,89 @@ def alive(row):
 
 
 def target():
-    return os.environ.get('TMUX_PANE', '')
+    """Where this session's terminal is. A tmux pane inside anything wins, then an sm pane, a Fine
+    tab, and last the holder socket of a background sm session nobody has placed on screen yet."""
+    env = os.environ
+    if env.get('TMUX_PANE'):
+        return env['TMUX_PANE']
+    if env.get('SM_PANE_ID'):
+        return 'sm:' + env['SM_PANE_ID'].lower()
+    if env.get('FINE_TAB_ID'):
+        return 'fine:' + env['FINE_TAB_ID'].lower()
+    if env.get('PEER_HOLD_SOCK'):
+        return 'hold:' + Path(env['PEER_HOLD_SOCK']).stem
+    return ''
+
+
+def python():
+    """The interpreter for long-lived peer processes (mail worker, peer-session, relay). Pin it in
+    <config>/python when PATH's python3 differs between login and ssh shells; otherwise this one."""
+    try:
+        value = (config() / 'python').read_text().strip()
+    except OSError:
+        value = ''
+    return value if value and Path(value).exists() else sys.executable
+
+
+@functools.lru_cache(maxsize=1)
+def sm():
+    """The session layer (sm) when it is installed: sm_session.py beside these files, or `sm-session` on PATH.
+    Else None, and peer runs on its own.
+
+    With it, agents live in sm's holder processes instead of tmux: `peer spawn` hands over to sm, a session sm
+    put to sleep counts as idle, and mail for it wakes it. sm imports peer_core itself; this is the only way back."""
+    found = shutil.which('sm-session')
+    for folder in (Path(__file__).resolve().parent, Path(found).resolve().parent if found else None):
+        if folder and (folder / 'sm_session.py').is_file():
+            if str(folder) not in sys.path:
+                sys.path.append(str(folder))
+            try:
+                import sm_session
+            except Exception:  # noqa: BLE001 - a broken session layer must not take peer down with it
+                return None
+            return sm_session
+    return None
+
+
+def sm_entry(name):
+    """sm's own record for a session name ({} without sm): which engine session it holds, whether it sleeps."""
+    layer = sm() if name else None
+    return layer.read(layer.entry_path(name)) if layer else {}
+
+
+IDENTITY = ('PEER_NAME', 'PEER_HOLD_SOCK', 'PEER_PARENT', 'PEER_VISIBLE', 'SM_WORKSPACE')
+
+
+def drop_inherited_identity(chain, env=os.environ):
+    """Forget peer/sm identity this session merely inherited. An agent that relaunches an app from its own
+    shell hands its PEER_NAME and holder socket down to every tab that app starts, and each of those tabs
+    then registered under that agent's name. Identity from sm is real only when the holder named by
+    PEER_HOLD_SOCK is an ancestor of this agent; inside a Fine tab, a PEER_NAME without such a holder came
+    from Fine's own environment, and so did an SM_PANE_ID."""
+    sock = env.get('PEER_HOLD_SOCK')
+    held = False
+    if sock:
+        holder = read(Path(sock).with_suffix('.json')).get('holder')
+        held = bool(holder) and any(p.get('pid') == holder for p in chain)
+        if not held:
+            for k in IDENTITY:
+                env.pop(k, None)
+    if env.get('FINE_TAB_ID') and not held:
+        for k in IDENTITY + ('SM_PANE_ID',):
+            env.pop(k, None)
+    return held
+
+
+def hold_fields():
+    """sm session facts every registration path records (Claude hook, Codex app-server watch): the holder
+    socket to attach to, who started it, and whether the user placed it on screen."""
+    env = os.environ
+    return dict(hold=env.get('PEER_HOLD_SOCK'), parent=env.get('PEER_PARENT'),
+                visible=bool(env.get('SM_PANE_ID') or env.get('PEER_VISIBLE') == '1' or not env.get('PEER_HOLD_SOCK')))
 
 
 def session_key(kind, sid):
-    if kind not in ('claude', 'codex') or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}', sid):
+    if kind not in ('claude', 'codex', 'omo') or not re.fullmatch(r'[a-zA-Z0-9_-]{1,128}', sid):
         raise ValueError('invalid engine/session identity')
     return kind + ':' + sid
 
@@ -201,10 +281,112 @@ def revive(row, live=None):
         return current
 
 
+def fine_tabs(timeout=.6):
+    """Fine's open tabs (id, name, harness, sessionId, running) from its control socket, or [] when Fine
+    isn't running here or doesn't answer quickly."""
+    sock = Path(os.environ.get('FINE_HOME', str(Path.home()))) / '.fine/control.sock'
+    if not sock.exists():
+        return []
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(timeout)
+            s.connect(str(sock))
+            s.sendall((json.dumps({'command': 'tab.list', 'args': {}}) + '\n').encode())
+            data = b''
+            while not data.endswith(b'\n'):
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        reply = json.loads(data or b'{}')
+        tabs = reply.get('result', reply) if isinstance(reply, dict) else reply
+        return tabs if isinstance(tabs, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def codex_process(sid):
+    """(pid, None) of the Codex TUI for this thread: by its resume argument, else by the rollout file it has
+    open right now (Codex opens it while writing), else None. Fine doesn't report its tabs' pids."""
+    try:
+        out = subprocess.run(['ps', '-eo', 'pid=,args='], capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(' ')
+        words = args.split()
+        program = os.path.basename(words[0]) if words else ''
+        node_codex = program == 'node' and len(words) > 1 and '/codex' in words[1]
+        if (program == 'codex' or node_codex) and sid in args and 'app-server' not in args and int(pid) != os.getpid():
+            return int(pid), None
+    files = list((Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'sessions').glob('*/*/*/rollout-*' + sid + '.jsonl'))
+    if not files:
+        return None
+    try:
+        pids = subprocess.run(['lsof', '-a', '-t', '-c', 'codex', str(files[-1])], capture_output=True, text=True, timeout=2).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (int(pids[0]), None) if pids else None
+
+
+def title_name(title, kind):
+    name = re.sub(r'[^\w.-]+', '-', title, flags=re.UNICODE).strip('-.')[:40]
+    return name if name and re.fullmatch(r'[\w][\w.-]{0,63}', name, re.UNICODE) else None
+
+
+def adopt_fine_tabs(tabs, live=None):
+    """Fine tabs are agents the user knows by their tab titles. Give their peer rows that name (unless someone
+    chose one), the tab address, and register open tabs whose hook never registered them (sessions started
+    before the hook, Codex tabs), so `peer` lists every Fine tab once, by the name on screen."""
+    live = claude_processes() if live is None else live
+    for tab in tabs:
+        kind, sid = tab.get('harness'), tab.get('sessionId')
+        if kind not in ('claude', 'codex') or not sid or not tab.get('running') or not re.fullmatch(r'[\w-]{1,128}', sid):
+            continue
+        ident = session_key(kind, sid)
+        file = path('sessions', ident)
+        with lock(file, .05):
+            row = read(file)
+            target = 'fine:' + str(tab['id']).lower()
+            if not row or not alive(row):
+                hit = live.get(sid) if kind == 'claude' else codex_process(sid)
+                now = time.time()
+                if not hit:
+                    continue
+                found = hit[0] if isinstance(hit[0], dict) else process(hit[0])
+                fresh = dict(id=ident, session=sid, kind=kind, host=host(), cwd=tab.get('cwd') or str(Path.home()),
+                             title=tab.get('name'), target=target, process=found,
+                             state={'busy': 'working'}.get(hit[1], 'idle'), reason='fine-tab', since=now, observed=now,
+                             named=False, chosen=False, label_checked=True, visible=True, hold=None, parent=None)
+                row = dict(fresh, **{k: v for k, v in row.items() if k in ('name', 'named', 'chosen', 'fine_named', 'cwd')})
+            row['title'] = tab.get('name') or row.get('title')
+            row['target'] = row.get('target') if str(row.get('target', '')).startswith('%') else target
+            wanted = title_name(row['title'] or '', kind)
+            if row.get('hold'):
+                pass  # an sm session: its name is its sm name, used for resume; the title only shows
+            elif wanted and not row.get('chosen') and not row.get('fine_named') and row.get('name') != wanted:
+                try:
+                    row['name'] = claim_name(ident, wanted, rename=bool(row.get('name')))
+                    row['fine_named'] = True  # once: a later title change must not move a name others use
+                except ValueError:
+                    pass
+            elif not row.get('name'):
+                row['name'] = claim_name(ident, (title_name(row['title'] or '', kind) or 'fine') + '-' + kind)
+            write(file, row)
+
+
+def asleep(row):
+    """sm put this session to sleep (idle past its prompt cache); it wakes on the next message or open."""
+    return bool(row.get('hold') and not alive(row) and sm_entry(row.get('name')).get('slept'))
+
+
 def public(row):
-    fields = ('id', 'session', 'name', 'kind', 'host', 'cwd', 'title', 'target', 'state', 'reason', 'since', 'observed', 'tmux_socket')
+    fields = ('id', 'session', 'name', 'kind', 'host', 'cwd', 'title', 'target', 'state', 'reason', 'since', 'observed', 'tmux_socket',
+              'hold', 'parent', 'visible')
     out = {k: row.get(k) for k in fields}
-    if not alive(row):
+    if asleep(row):
+        out.update(state='idle', reason='asleep')  # to everyone else it is simply idle; a message wakes it
+    elif not alive(row):
         out.update(state='gone', reason='process-ended')
     waiting = read(path('waiting', row['id']))
     if out['state'] not in ('blocked', 'gone', 'error') and waiting.get('until', 0) > time.time() and alive(waiting):
@@ -256,6 +438,32 @@ def permission_mode(pid):
     return 'bypass' if any(f in args for f in flags) else 'default'
 
 
+def free_name(names, preferred, ident):
+    chosen, n = preferred, 2
+    while chosen in names and names[chosen] != ident:
+        chosen = preferred[:55] + '-' + str(n)
+        n += 1
+    return chosen
+
+
+def hand_over_sm_name(names, name, ident):
+    """sm reuses a closed session's name, but that session's peer row kept it, so the new one became name-2 and mail
+    for name went to the dead row. When sm's own record gives name to this session and the old owner has ended,
+    the name moves here and the old row steps aside to name-N."""
+    owner = names.get(name)
+    if not owner or owner == ident or sm_entry(name).get('session') != ident.partition(':')[2]:
+        return
+    file = path('sessions', owner)
+    row = read(file)
+    if row and alive(row):
+        return
+    if row:
+        row['name'] = free_name(names, name, None)
+        names[row['name']] = owner
+        write(file, row)
+    del names[name]
+
+
 def claim_name(ident, preferred, explicit=False, rename=False):
     file = root() / 'names.json'
     with lock(file, .02):
@@ -266,6 +474,7 @@ def claim_name(ident, preferred, explicit=False, rename=False):
         if previous == preferred:
             return previous
         preferred = valid_name(preferred)
+        hand_over_sm_name(names, preferred, ident)
         chosen = preferred
         n = 2
         while chosen in names and names[chosen] != ident:
@@ -330,10 +539,12 @@ def observe(event, kind):
     if not sid or event.get('agent_id') or not state:
         return None
     chain = ancestry()
-    agent = next((p for p in chain if p['name'] in ('claude', 'codex') or
+    # OmO runs its session in an RPC host (bun) under the TUI; the hook is that host's child (peer-omo.js).
+    agent = next((p for p in chain if p['name'] in ('claude', 'codex') or (kind == 'omo' and p['name'] in ('bun', 'node')) or
                   (kind == 'claude' and re.fullmatch(r'\d+\.\d+\.\d+', p['name']))), None)
     if not agent:
         return None
+    drop_inherited_identity(chain)
     ident = session_key(kind, sid)
     file = path('sessions', ident)
     with lock(file, .02):
@@ -347,6 +558,14 @@ def observe(event, kind):
             preferred = clean_name(os.environ.get('PEER_NAME')) or label or base[:45] + '-' + kind
             if not name or label:
                 name = claim_name(ident, preferred, rename=bool(name))
+        # sm passes the session's name as PEER_NAME. It wins over a name this session picked up on its own
+        # (e.g. its last hook in another terminal before sm resumed it), but never over one chosen with `peer name`.
+        wanted = clean_name(os.environ.get('PEER_NAME'))
+        if wanted and name != wanted and not old.get('chosen'):
+            try:
+                name = claim_name(ident, wanted, rename=True)
+            except ValueError:
+                pass
         now = time.time()
         row = dict(id=ident, session=sid, kind=kind, name=name, host=host(), cwd=cwd,
                    title=old.get('title'), target=target(), process=agent, ancestors=chain,
@@ -354,7 +573,9 @@ def observe(event, kind):
                    observed=now, tmux_socket=os.environ.get('TMUX', '').split(',')[0],
                    codex_home=os.environ.get('CODEX_HOME', str(Path.home() / '.codex')),
                    codex_socket=os.environ.get('PEER_CODEX_SOCKET'), transcript=event.get('transcript_path'),
-                   named=bool(old.get('named') or os.environ.get('PEER_NAME')), label_checked=True)
+                   omo_socket=event.get('omo_socket') or old.get('omo_socket'),
+                   named=bool(old.get('named') or os.environ.get('PEER_NAME')), chosen=bool(old.get('chosen')),
+                   label_checked=True, **hold_fields())
         # A turn that ended well closes what was asked of it; a failed one tells those still waiting.
         row['turn_ok_at'] = now if event.get('hook_event_name') == 'Stop' else old.get('turn_ok_at')
         if event.get('hook_event_name') == 'StopFailure':
