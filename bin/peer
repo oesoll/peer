@@ -92,6 +92,8 @@ def dispatch(owner, request):
 
 def rpc(request, source):
     op = request.get('op')
+    if op == 'ping':
+        return dict(host=host(), protocol=1, transport='peer')
     if op == 'spawn':
         from peer_spawn import spawn
         flags = ['--pane', request['pane']] if request.get('pane') else []
@@ -256,8 +258,15 @@ def say(name, body, ask=False, timeout=30):
 
 def main(argv):
     if argv and argv[0] == '_rpc':
-        print(json.dumps(rpc(json.loads(argv[2]), argv[1])))
+        # The request comes on stdin; an argument is still accepted from callers that send it that way.
+        body = argv[2] if len(argv) > 2 else sys.stdin.read(1024 * 1024 + 1)
+        if len(body) > 1024 * 1024:
+            raise ValueError('RPC request exceeds 1 MiB')
+        print(json.dumps(rpc(json.loads(body), argv[1])))
         return
+    if argv and argv[0] == 'relay':
+        from peer_core import python
+        os.execv(python(), [python(), str(BIN / 'peer-relay')] + argv[1:])
     if argv and argv[0] == '_work':
         work('--once' in argv)
         return
@@ -289,6 +298,8 @@ def main(argv):
   peer install [--accept-inbound] [--codex-alias]
                                      hook into Claude Code and Codex (peer doctor explains both)
   peer doctor                        what works, what is missing, how to fix it
+  peer relay status|keygen|install|serve
+                                     reach a machine that takes no ssh logins, through a hub
 
 Messages go through each engine's own input path, never your terminal:
 a draft you are typing stays intact and an approval prompt never gets an Enter.

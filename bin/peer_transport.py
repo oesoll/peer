@@ -1,4 +1,4 @@
-"""Codex app-server client and the ssh transport between machines."""
+"""Codex app-server client and the transport between machines: ssh, or an authenticated relay tunnel."""
 import base64
 import concurrent.futures
 import hashlib
@@ -36,6 +36,8 @@ class WebSocket:
             if not chunk:
                 raise ConnectionError('app-server closed the connection during the WebSocket handshake')
             head += chunk
+            if len(head) > 65536:
+                raise ConnectionError('oversized app-server WebSocket handshake')
         head, self.buffer = head.split(b'\r\n\r\n', 1)
         status = head.split(b'\r\n', 1)[0].split()
         accept = base64.b64encode(hashlib.sha1((key + self.GUID).encode()).digest())
@@ -74,6 +76,8 @@ class WebSocket:
                 n = int.from_bytes(self._read(2), 'big')
             elif n == 127:
                 n = int.from_bytes(self._read(8), 'big')
+            if n > 64 * 1024 * 1024:
+                raise ConnectionError('app-server WebSocket frame exceeds 64 MiB')
             mask = self._read(4) if second & 0x80 else None
             data = self._read(n)
             if mask:
@@ -134,30 +138,45 @@ class CodexClient:
 
 
 def hosts():
-    """Other machines from hosts.json: {"server": {"ssh": "me@server", "peer": "~/.local/bin/peer"}}.
+    """Other machines from hosts.json, each reached one of two ways:
 
-    "peer" is the command on that machine; non-interactive ssh often lacks ~/.local/bin in PATH."""
+        {"server": {"ssh": "me@server", "peer": "~/.local/bin/peer"},
+         "laptop": {"relay": "home"}}
+
+    "ssh" runs peer there over ssh; "peer" is the command on that machine (non-interactive ssh often lacks
+    ~/.local/bin in PATH). "relay" names a hub from relay.json, for a machine that takes no ssh logins:
+    it keeps a tunnel open to the hub itself (`peer relay`)."""
     result = {}
     for name, entry in read(config() / 'hosts.json').items():
         if name == host():
             continue
-        if not isinstance(entry, dict) or not isinstance(entry.get('ssh'), str) or not entry['ssh'].strip():
-            raise ValueError('hosts.json: "%s" needs {"ssh": "<destination>"}' % name)
+        ssh, relay = (entry.get(k) if isinstance(entry, dict) else None for k in ('ssh', 'relay'))
+        if not any(isinstance(v, str) and v.strip() for v in (ssh, relay)):
+            raise ValueError('hosts.json: "%s" needs {"ssh": "<destination>"} or {"relay": "<hub>"}' % name)
         result[name] = entry
     return result
 
 
 def remote(owner, request):
-    """Run one peer operation on another machine over ssh.
+    """Run one peer operation on another machine.
 
-    The other side trusts the origin name we send: ssh already proved we are the same user there,
-    and that user could run anything on that machine anyway."""
+    The other side trusts the origin name we send: ssh already proved we are the same user there, and that
+    user could run anything on that machine anyway. A relay request carries a signature made with relay.key,
+    which only the user's own machines hold. The request travels on stdin: one argument is capped at 128 KB
+    on Linux, which a long message in a non-Latin script passes once escaped."""
     entry = hosts().get(owner)
     if not entry:
         raise ValueError('unknown peer host: %s (add it to %s)' % (owner, config() / 'hosts.json'))
-    command = '%s _rpc %s %s' % (entry.get('peer', '~/.local/bin/peer'), shlex.quote(host()), shlex.quote(json.dumps(request)))
-    result = subprocess.run(['ssh', '-n', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3', entry['ssh'], command],
-                            capture_output=True, timeout=8)
+    body = json.dumps(request)
+    if entry.get('relay'):
+        import peer_relay
+        result = peer_relay.call(entry['relay'], owner, ['_rpc', host(), body])
+        if result['code']:
+            raise ValueError(owner + ': ' + result['err'].strip()[:500])
+        return json.loads(result['out'])
+    command = '%s _rpc %s' % (entry.get('peer', '~/.local/bin/peer'), shlex.quote(host()))
+    result = subprocess.run(['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3', entry['ssh'], command],
+                            input=body.encode(), capture_output=True, timeout=8)
     if result.returncode:
         raise ValueError(owner + ': ' + result.stderr.decode(errors='replace').strip()[:500])
     return json.loads(result.stdout)

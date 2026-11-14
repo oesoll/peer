@@ -190,7 +190,9 @@ def doctor(argv):
             count = len(remote(name, {'op': 'list'})['peers'])
             line('✓', 'host ' + name, '%d sessions' % count)
         except Exception as error:  # noqa: BLE001 — report every host, whatever broke
-            line('✗', 'host ' + name, str(error)[:120], 'check ssh %s and peer there' % others[name]['ssh'])
+            entry = others[name]
+            line('✗', 'host ' + name, str(error)[:120], 'check ssh %s and peer there' % entry['ssh'] if entry.get('ssh')
+                 else 'peer relay status  (the relay tunnel to %s)' % entry.get('relay'))
     width = max(len(r[1]) for r in rows)
     for mark, what, detail, fix in rows:
         print('%s %-*s  %s' % (mark, width, what, detail))

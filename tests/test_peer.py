@@ -535,16 +535,43 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(list(t.hosts()), ['server'])  # this machine is skipped
         calls = []
         def fake(cmd, **kw):
-            calls.append(cmd)
+            calls.append((cmd, kw))
             return type('R', (), {'returncode': 0, 'stdout': b'{"peers": []}', 'stderr': b''})()
         with patch.object(t.subprocess, 'run', side_effect=fake):
             t.inventory([])
-        self.assertEqual(calls[0][:6], ['ssh', '-n', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3'])
-        self.assertEqual(calls[0][6], 'me@server')
-        self.assertTrue(calls[0][7].startswith('~/.local/bin/peer _rpc test '))
-        (self.root / 'config/hosts.json').write_text(json.dumps({'bad': 'server'}))
-        with self.assertRaises(ValueError):
-            t.hosts()
+        cmd, kw = calls[0]
+        self.assertEqual(cmd[:6], ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3'])
+        self.assertEqual(cmd[6:], ['me@server', '~/.local/bin/peer _rpc test'])
+        self.assertEqual(json.loads(kw['input']), {'op': 'list'})  # on stdin: no argument-length limit
+        for bad in ({'bad': 'server'}, {'bad': {}}, {'bad': {'ssh': ' '}}):
+            (self.root / 'config/hosts.json').write_text(json.dumps(bad))
+            with self.assertRaises(ValueError):
+                t.hosts()
+
+    def test_a_long_message_goes_on_stdin_and_a_relay_host_through_its_hub(self):
+        (self.root / 'config/hosts.json').write_text(json.dumps({'server': {'ssh': 'server', 'peer': 'bin/peer'},
+                                                                 'laptop': {'relay': 'hub'}}))
+        payload = {'op': 'receive', 'body': '한글\n" $(false)' * 10000}
+        with patch.object(t.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'{}', stderr=b'')) as run:
+            self.assertEqual(t.remote('server', payload), {})
+        self.assertEqual(run.call_args.args[0][-1], 'bin/peer _rpc test')
+        self.assertEqual(json.loads(run.call_args.kwargs['input']), payload)
+        import peer_relay
+        with patch.object(peer_relay, 'call', return_value={'code': 0, 'out': '{"ok": 1}', 'err': ''}) as call:
+            self.assertEqual(t.remote('laptop', {'op': 'ping'}), {'ok': 1})
+        self.assertEqual(call.call_args.args[:2], ('hub', 'laptop'))
+        self.assertEqual(call.call_args.args[2][:2], ['_rpc', 'test'])
+        with patch.object(peer_relay, 'call', return_value={'code': 1, 'out': '', 'err': 'error: refused\n'}):
+            with self.assertRaisesRegex(ValueError, 'laptop: error: refused'):
+                t.remote('laptop', {'op': 'ping'})
+
+    def test_rpc_reads_its_request_from_stdin(self):
+        out = io.StringIO()
+        with patch.object(cli.sys, 'stdin', io.StringIO('{"op": "ping"}')), contextlib.redirect_stdout(out):
+            cli.main(['_rpc', 'other'])
+        self.assertEqual(json.loads(out.getvalue()), {'host': 'test', 'protocol': 1, 'transport': 'peer'})
+        with patch.object(cli.sys, 'stdin', io.StringIO('x' * (1024 * 1024 + 1))), self.assertRaisesRegex(ValueError, '1 MiB'):
+            cli.main(['_rpc', 'other'])
 
     def test_install_keeps_other_settings_and_uninstall_is_clean(self):
         claude = self.root / 'claude'; claude.mkdir()
