@@ -1,4 +1,4 @@
-"""Between machines (the relay) and the Codex launcher's resume handling."""
+"""Between machines (relay, remote commands and files) and the Codex launcher's resume handling."""
 import importlib.machinery
 import importlib.util
 import io
@@ -17,6 +17,7 @@ BIN = Path(__file__).resolve().parents[1] / 'bin'
 sys.path.insert(0, str(BIN))
 import peer_codex
 import peer_relay as relay
+import peer_remote
 from peer_transport import RPCError
 loader = importlib.machinery.SourceFileLoader('peer_session_launcher', str(BIN / 'peer-session'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -81,6 +82,36 @@ class RelayTests(unittest.TestCase):
                         relay.request(endpoint, 'fixture', ['_rpc', 'client', '{"op":"ping"}'], b'x' * 32)
             finally:
                 server.shutdown(); thread.join(); server.server_close()
+
+
+class RemoteTests(unittest.TestCase):
+    """sm's `run` and `cp` toward a machine without ssh: the target side runs here, as `peer _rpc` would."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.env = patch.dict(os.environ, PEER_STATE=str(Path(self.temp.name) / 'state')); self.env.start()
+        self.call = patch.object(peer_remote, 'call', side_effect=lambda host, request: peer_remote.OPS[request['op']](request))
+        self.call.start()
+
+    def tearDown(self):
+        self.call.stop(); self.env.stop(); self.temp.cleanup()
+
+    def test_a_command_runs_there_and_streams_back(self):
+        out, err = io.BytesIO(), io.BytesIO()
+        code = peer_remote.run('there', ['sh', '-c', 'printf "out $1"; printf err >&2; exit 3', 'x', 'arg one'],
+                               cwd=self.temp.name, out=out, err=err)
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (3, b'out arg one', b'err'))
+        self.assertEqual(list((Path(self.temp.name) / 'state/jobs').iterdir()), [])  # read to the end: cleaned up
+
+    def test_files_move_in_pieces_and_keep_their_mode(self):
+        src = Path(self.temp.name) / 'src.bin'
+        src.write_bytes(os.urandom(peer_remote.CHUNK * 2 + 7)); src.chmod(0o750)
+        there = Path(self.temp.name) / 'far/dst.bin'
+        back = Path(self.temp.name) / 'back.bin'
+        self.assertEqual(peer_remote.put('there', src, str(there)), src.stat().st_size)
+        self.assertEqual(peer_remote.get('there', str(there), back), src.stat().st_size)
+        self.assertEqual((there.read_bytes(), back.read_bytes()), (src.read_bytes(), src.read_bytes()))
+        self.assertEqual(there.stat().st_mode & 0o777, 0o750)
 
 
 class ResumeTests(unittest.TestCase):

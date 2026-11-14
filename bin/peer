@@ -94,6 +94,9 @@ def rpc(request, source):
     op = request.get('op')
     if op == 'ping':
         return dict(host=host(), protocol=1, transport='peer')
+    import peer_remote
+    if op in peer_remote.OPS:  # commands and files for a machine that cannot ssh here (sm run, sm cp)
+        return peer_remote.OPS[op](request)
     if op == 'spawn':
         from peer_spawn import spawn
         flags = ['--pane', request['pane']] if request.get('pane') else []
