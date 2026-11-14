@@ -99,7 +99,7 @@ Run `peer relay keygen` on one of them, copy `~/.config/peer/relay.key` (mode 60
 
 Run `peer pair` on two machines on the same Wi-Fi. The first waits, the second finds it, and both show a six-digit number: confirm it matches on both screens and they are paired. Then run `peer serve` on each, and agents reach each other by name as if they were on one machine.
 
-Only paired machines are answered, over TLS with the certificate saved at pairing; being on the same network is not enough. A paired machine can only message your agents; starting or reading them, running commands and copying files stay with ssh and relay. A message can still ask an agent to do things, so pair only your own. Networks that block discovery (guest Wi-Fi, a VPN): `peer pair ADDRESS:PORT`, as the waiting side prints. A firewall needs TCP 47231-47232 open from your network. `peer pair --list` and `--forget NAME` manage the list.
+Only paired machines are answered, over TLS with the certificate saved at pairing; being on the same network is not enough. A paired machine can only exchange messages: send to your agents, read their recent answers (`peer read`) and post a notice (`peer notify`); starting agents, running commands and copying files stay with ssh and relay. A message can still ask an agent to do things, so pair only your own. Networks that block discovery (guest Wi-Fi, a VPN): `peer pair ADDRESS:PORT`, as the waiting side prints. A firewall needs TCP 47231-47232 open from your network. `peer pair --list` and `--forget NAME` manage the list.
 
 ### Your own launchers
 

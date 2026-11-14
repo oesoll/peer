@@ -95,10 +95,10 @@ class LanTests(unittest.TestCase):
                 break
         for op in sorted(peer_lan.MESSAGE_OPS):
             self.assertEqual(peer_lan.call('beta', {'op': op})['echo'], {'op': op})
-        # Commands, files, starting or reading agents, and anything new: refused before beta's rpc sees them.
+        # Commands, files, starting agents, and anything new: refused before beta's rpc sees them.
         for request in ({'op': 'exec_start', 'argv': ['true']}, {'op': 'exec_poll', 'job': 'x'},
                         {'op': 'fget', 'path': '/etc/hosts'}, {'op': 'fput', 'path': '/tmp/x', 'data': ''},
-                        {'op': 'spawn', 'name': 'x'}, {'op': 'read', 'session': 'x'}, {'op': 'notify'},
+                        {'op': 'spawn', 'name': 'x'},
                         {'op': 'not-yet-invented'}, {}, {'op': ['list']}, ['list']):
             with self.assertRaisesRegex(ValueError, 'only messages'):
                 peer_lan.call('beta', request)

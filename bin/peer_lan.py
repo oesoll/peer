@@ -1,7 +1,7 @@
 """Machines on the same network: pair once, then find each other and talk over TLS, without ssh.
 
 Pairing is the only trust step, and it buys messages only (MESSAGE_OPS): a paired machine can find agents
-here and talk to them, not start them, run commands or touch files, which ssh and relay carry for someone
+here, talk to them, read their recent answers and post a notice, not start them, run commands or touch files, which ssh and relay carry for someone
 who already has a shell here. Nothing unpaired is answered, and being on the same Wi-Fi proves nothing; in
 a cafe the person at the next table is on it too.
 
@@ -30,7 +30,7 @@ PAIRING = '_peerpair._tcp'
 LIMIT = 1 << 20  # one request line; messages are far smaller
 # Pairing proves a machine on this network, not a person with a shell here, so it gets messages and
 # nothing that runs or reads things (spawn, read, sm run, sm cp). A new operation is refused until listed.
-MESSAGE_OPS = frozenset({'ping', 'list', 'receive', 'receipt'})
+MESSAGE_OPS = frozenset({'ping', 'list', 'receive', 'receipt', 'read', 'notify'})
 
 
 def folder():
