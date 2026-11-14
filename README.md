@@ -95,6 +95,12 @@ A machine that takes no ssh logins (a laptop with Remote Login off) keeps an out
 
 Run `peer relay keygen` on one of them, copy `~/.config/peer/relay.key` (mode 600) to the others but never to the hub, then `peer relay install` on each to keep its tunnel up. In hosts.json such a machine is `{ "laptop": { "relay": "home" } }`. `peer relay status` checks every route.
 
+### Same network, no ssh
+
+Run `peer pair` on two machines on the same Wi-Fi. The first waits, the second finds it, and both show a six-digit number: confirm it matches on both screens and they are paired. Then run `peer serve` on each, and agents reach each other by name as if they were on one machine.
+
+Only paired machines are answered, over TLS with the certificate saved at pairing; being on the same network is not enough. A paired machine can only message your agents; starting or reading them, running commands and copying files stay with ssh and relay. A message can still ask an agent to do things, so pair only your own. Networks that block discovery (guest Wi-Fi, a VPN): `peer pair ADDRESS:PORT`, as the waiting side prints. A firewall needs TCP 47231-47232 open from your network. `peer pair --list` and `--forget NAME` manage the list.
+
 ### Your own launchers
 
 If you start agents through wrappers, tell `peer spawn` and `peer run` about them:

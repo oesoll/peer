@@ -294,6 +294,50 @@ def notify(argv):
     print(json.dumps(result, ensure_ascii=False))
 
 
+def pair(argv):
+    """Pair with another machine: run `peer pair` on both. The first one waits, the second finds it."""
+    import peer_lan
+    if argv[:1] == ['--list']:
+        rows = peer_lan.paired()
+        for name, row in sorted(rows.items()):
+            print('%-20s %s%s' % (name, row.get('address') or '?', ' (fixed address)' if row.get('fixed') else ''))
+        if not rows:
+            print('no paired machines; run peer pair on two machines on the same network')
+        return
+    if argv[:1] == ['--forget']:
+        if len(argv) != 2:
+            raise ValueError('usage: peer pair --forget NAME')
+        peer_lan.forget(argv[1])
+        print('forgot ' + argv[1])
+        return
+
+    def confirm(name, number):
+        # Always a person: an agent that could answer this could pair any machine that asked.
+        if not sys.stdin.isatty():
+            raise ValueError('pairing needs a person to compare the numbers; run peer pair in a terminal')
+        try:
+            return input('Is %s %s shown on %s too? [y/N] ' % (number[:3], number[3:], name)).strip().lower() in ('y', 'yes')
+        except EOFError:
+            return False
+
+    target = argv[0] if argv else None
+    if target and re.fullmatch(r'[\w.-]+:\d+', target):
+        address, port = target.rsplit(':', 1)
+        return peer_lan.pair_join(address, int(port), confirm, fixed=True)
+    offers = peer_lan.pairing_offers()
+    if target:
+        if target not in offers:
+            raise ValueError('%s is not waiting to pair on this network (found: %s)' % (target, ', '.join(offers) or 'none'))
+        offers = {target: offers[target]}
+    if len(offers) > 1:
+        raise ValueError('several machines are waiting to pair: %s; run peer pair NAME' % ', '.join(sorted(offers)))
+    if offers:
+        name, where = next(iter(offers.items()))
+        address, port = where.rsplit(':', 1)
+        return peer_lan.pair_join(address, int(port), confirm)
+    return peer_lan.pair_listen(confirm)
+
+
 def main(argv):
     if argv and argv[0] == '_rpc':
         # The request comes on stdin; an argument is still accepted from callers that send it that way.
@@ -310,6 +354,13 @@ def main(argv):
     if argv and argv[0] == '_work':
         work('--once' in argv)
         return
+    if argv and argv[0] == 'serve':
+        import peer_lan
+        print('peer: answering paired machines on port %d' % peer_lan.PORT, flush=True)
+        peer_lan.serve(rpc)
+        return
+    if argv and argv[0] == 'pair':
+        return pair(argv[1:])
     as_json = '--json' in argv
     argv = [a for a in argv if a != '--json']
     if argv and argv[0] in ('install', 'uninstall'):
@@ -342,6 +393,9 @@ def main(argv):
                                      reach a machine that takes no ssh logins, through a hub
   peer notify HOST|local TEXT [--title T] [--state S]
                                      ask for the person's attention through sm's app or Fine
+  peer pair [NAME | ADDRESS:PORT]    pair with another machine on this network (run it on both)
+  peer pair --list | --forget NAME   paired machines
+  peer serve                         answer paired machines with messages only (run it on each)
 
 From a script: peer say NAME - --from SCRIPT [--id 24_HEX] [--session ID]
   '-' reads the text from stdin; it arrives from service:SCRIPT. A retry with the same --id is the

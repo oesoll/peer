@@ -163,10 +163,16 @@ def remote(owner, request):
     The other side trusts the origin name we send: ssh already proved we are the same user there, and that
     user could run anything on that machine anyway. A relay request carries a signature made with relay.key,
     which only the user's own machines hold. The request travels on stdin: one argument is capped at 128 KB
-    on Linux, which a long message in a non-Latin script passes once escaped."""
+    on Linux, which a long message in a non-Latin script passes once escaped.
+
+    A machine paired on this network (peer pair) is used only when hosts.json does not name it: a paired
+    machine answers messages only, while ssh and relay also carry sm run and sm cp."""
     entry = hosts().get(owner)
     if not entry:
-        raise ValueError('unknown peer host: %s (add it to %s)' % (owner, config() / 'hosts.json'))
+        from peer_lan import call, paired
+        if owner in paired():
+            return call(owner, request)  # TLS against the certificate saved at pairing, no ssh
+        raise ValueError('unknown peer host: %s (pair with it: peer pair, or add it to %s)' % (owner, config() / 'hosts.json'))
     body = json.dumps(request)
     if entry.get('relay'):
         import peer_relay
@@ -185,7 +191,8 @@ def remote(owner, request):
 def inventory(local):
     rows = list(local)
     errors = []
-    destinations = hosts()
+    from peer_lan import paired
+    destinations = list(dict.fromkeys([*hosts(), *(n for n in paired() if n != host())]))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(len(destinations), 8))) as pool:
         futures = {pool.submit(remote, owner, {'op': 'list'}): owner for owner in destinations}
         for future in concurrent.futures.as_completed(futures):
