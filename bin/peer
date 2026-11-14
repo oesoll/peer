@@ -94,8 +94,13 @@ def rpc(request, source):
     op = request.get('op')
     if op == 'spawn':
         from peer_spawn import spawn
+        flags = ['--pane', request['pane']] if request.get('pane') else []
+        flags += ['--visible'] if request.get('visible') else []
+        flags += ['--parent', request['parent']] if request.get('parent') else []
+        for item in request.get('env', []):
+            flags += ['--env', item]
         return spawn([request['name'], '--kind', request['kind'], '--cwd', request['cwd'],
-                      '--timeout', str(request.get('timeout', 5)), '--'] + request.get('args', []))
+                      '--timeout', str(request.get('timeout', 5))] + flags + ['--'] + request.get('args', []))
     if op == 'list':
         return {'peers': local_inventory()}
     if op == 'receive':
@@ -278,7 +283,8 @@ def main(argv):
   peer wait NAME [--until idle]      wait for a state
   peer me | peer name NEW            who you are / rename yourself (kept across resume)
   peer receipt HOST/ID               where a message stopped
-  peer spawn NAME --kind claude|codex [--cwd DIR] [--host HOST] [-- ARGS]
+  peer spawn NAME --kind claude|codex [--cwd DIR] [--host HOST] [--env K=V] [-- ARGS]
+                                     start one (through sm when it is installed, else in tmux)
   peer run codex [ARGS]              start Codex so peer can reach it
   peer install [--accept-inbound] [--codex-alias]
                                      hook into Claude Code and Codex (peer doctor explains both)

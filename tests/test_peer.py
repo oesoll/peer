@@ -796,5 +796,24 @@ class PeerTests(unittest.TestCase):
         req, _ = self.message(row)
         d.attempt(c.mail_path(row['id'], req['id']))
         self.assertEqual(c.receipt(req['id'])['stage'], 'held')
+
+    def test_spawn_goes_through_sm_when_installed_else_tmux(self):
+        import peer_spawn
+        layer = SimpleNamespace(spawn=lambda *a, **kw: dict(name=a[0], via='sm', args=a, kw=kw))
+        with patch.object(peer_spawn, 'sm', return_value=layer):
+            out = peer_spawn.spawn(['worker', '--kind', 'codex', '--cwd', '/tmp', '--env', 'A=1', '--pane', 'P', '--', '-m', 'x'])
+        self.assertEqual(out['args'][:7], ('worker', 'codex', '/tmp', 'P', False, ['A=1'], ['-m', 'x']))
+        with patch.object(peer_spawn, 'sm', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'sm, which is not installed'):
+                peer_spawn.spawn(['worker', '--kind', 'codex', '--pane', 'P'])
+            with patch.object(peer_spawn.shutil, 'which', return_value='/bin/x'), \
+                    patch.object(peer_spawn.subprocess, 'check_output', return_value='%9\n') as tmux:
+                out = peer_spawn.spawn(['worker', '--kind', 'codex', '--cwd', '/tmp', '--timeout', '0.01', '--env', 'A=1', '--', '-m', 'x'])
+        command = tmux.call_args.args[0][-1]
+        self.assertIn('PEER_NAME=worker', command)
+        self.assertIn('A=1', command)
+        self.assertIn('peer-session codex -m x', command)
+        self.assertEqual(out['target'], '%9')
+
 if __name__ == '__main__':
     unittest.main()

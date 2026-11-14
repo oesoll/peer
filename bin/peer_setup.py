@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from peer_core import config, launcher, read, root
+from peer_core import config, launcher, read, root, sm
 from peer_transport import BIN, hosts, remote
 
 MARKER = 'peer-hook'
@@ -175,7 +175,10 @@ def doctor(argv):
         reachable = alias_installed()
         line('✓' if reachable else '·', 'plain codex reachable', 'alias in %s' % rc if reachable else 'only `peer run codex` sessions',
              '' if reachable else 'peer install --codex-alias  (otherwise a plain `codex` never gets messages)')
-    line('✓' if shutil.which('tmux') else '·', 'tmux', 'for peer spawn and nearby grouping', '' if shutil.which('tmux') else 'install tmux')
+    if sm():
+        line('✓', 'sm', 'peer spawn starts sessions through it')
+    line('✓' if shutil.which('tmux') else '·', 'tmux', 'nearby grouping' + ('' if sm() else ' and peer spawn'),
+         '' if shutil.which('tmux') else 'install tmux')
     line('✓', 'state', str(root()))
     try:
         others = hosts()
