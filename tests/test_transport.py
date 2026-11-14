@@ -1,4 +1,4 @@
-"""Between machines (relay, remote commands and files) and the Codex launcher's resume handling."""
+"""Between machines (relay, remote commands and files), attention, and the Codex launcher's resume handling."""
 import importlib.machinery
 import importlib.util
 import io
@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 BIN = Path(__file__).resolve().parents[1] / 'bin'
 sys.path.insert(0, str(BIN))
+import peer_attention
 import peer_codex
 import peer_relay as relay
 import peer_remote
@@ -112,6 +113,36 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(peer_remote.get('there', str(there), back), src.stat().st_size)
         self.assertEqual((there.read_bytes(), back.read_bytes()), (src.read_bytes(), src.read_bytes()))
         self.assertEqual(there.stat().st_mode & 0o777, 0o750)
+
+
+class AttentionTests(unittest.TestCase):
+    def test_app_socket_receives_unicode_and_the_return_address(self):
+        with tempfile.TemporaryDirectory(prefix='attention-', dir='/tmp') as temp:
+            address = str(Path(temp) / 'control.sock')
+            server = socket.socket(socket.AF_UNIX); server.bind(address); server.listen()
+            self.addCleanup(server.close)
+            seen = []
+            def serve():
+                conn, _ = server.accept()
+                with conn, conn.makefile('rb') as stream:
+                    seen.append(json.loads(stream.readline()))
+                    conn.sendall(b'{"ok":true,"result":{"accepted":true}}\n')
+            thread = threading.Thread(target=serve); thread.start()
+            with patch.dict(os.environ, SM_CONTROL_SOCK=address, FINE_HOME=temp):
+                result = peer_attention.post({'source': 'sm:worker', 'key': 'fixture', 'message': '원문\n$(false)',
+                                              'state': 'waiting', 'title': 'check'}, 'remote')
+            thread.join(2)
+            self.assertEqual(result, {'accepted': True})
+            self.assertEqual(seen[0]['args']['host'], 'remote')
+            self.assertEqual(seen[0]['args']['message'], '원문\n$(false)')
+            self.assertEqual(seen[0]['args']['source'], 'sm:worker')
+
+    def test_invalid_attention_does_not_touch_apps(self):
+        with patch.object(peer_attention, 'app_rpc') as rpc:
+            for request in ({'state': 'unknown-state'}, {'message': 'x' * 1801}):
+                with self.assertRaises(ValueError):
+                    peer_attention.post(request, 'client')
+            rpc.assert_not_called()
 
 
 class ResumeTests(unittest.TestCase):

@@ -824,6 +824,31 @@ class PeerTests(unittest.TestCase):
         d.attempt(c.mail_path(row['id'], req['id']))
         self.assertEqual(c.receipt(req['id'])['stage'], 'held')
 
+    def test_a_script_sends_as_a_service_with_a_stable_id(self):
+        target = self.observe('PostToolUse', sid='target')
+        sent = []
+        def dispatch(owner, request):
+            sent.append(request)
+            return d.receive(request, owner) if request['op'] == 'receive' else c.receipt(request['id'])
+        ident = 'ab' * 12
+        with patch.object(cli, 'all_peers', return_value=([c.public(target)], [])), patch.object(cli, 'dispatch', side_effect=dispatch), \
+                patch.object(cli, 'me', side_effect=AssertionError('a script has no session')), patch.object(cli, 'SETTLE', 0):
+            first = cli.say('demo-claude', 'build is green', sender_name='ci', ident=ident)
+            again = cli.say('demo-claude', 'build is green', sender_name='ci', ident=ident)
+            with self.assertRaisesRegex(ValueError, 'content conflict'):
+                cli.say('demo-claude', 'build is red', sender_name='ci', ident=ident)
+            with self.assertRaisesRegex(ValueError, '24 lowercase hex'):
+                cli.say('demo-claude', 'x', sender_name='ci', ident='not-hex')
+            with self.assertRaisesRegex(ValueError, 'session changed'):
+                cli.say('demo-claude', 'x', sender_name='ci', expected_session='another')
+            with self.assertRaisesRegex(ValueError, 'peer ask needs'):
+                cli.say('demo-claude', 'x', ask=True, sender_name='ci')
+        self.assertEqual(first['id'], again['id'])
+        self.assertEqual(sent[0]['sender']['id'], 'service:ci')
+        self.assertEqual(len(list(c.inbox(target['id']))), 1)
+        self.assertIn('[from service:ci@test] build is green', c.hook_deliver(target, {'hook_event_name': 'PostToolUse'})
+                      ['hookSpecificOutput']['additionalContext'])
+
     def test_spawn_goes_through_sm_when_installed_else_tmux(self):
         import peer_spawn
         layer = SimpleNamespace(spawn=lambda *a, **kw: dict(name=a[0], via='sm', args=a, kw=kw))

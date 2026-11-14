@@ -94,6 +94,9 @@ def rpc(request, source):
     op = request.get('op')
     if op == 'ping':
         return dict(host=host(), protocol=1, transport='peer')
+    if op == 'notify':
+        import peer_attention
+        return peer_attention.post(request, source)
     import peer_remote
     if op in peer_remote.OPS:  # commands and files for a machine that cannot ssh here (sm run, sm cp)
         return peer_remote.OPS[op](request)
@@ -211,10 +214,21 @@ def settled(owner, ident, result):
     return result
 
 
-def say(name, body, ask=False, timeout=30):
-    sender = me()
+def say(name, body, ask=False, timeout=30, sender_name=None, ident=None, expected_session=None):
+    if sender_name:
+        if ask:
+            raise ValueError('--from is for scripts and services; peer ask needs a running session')
+        valid_name(sender_name)
+        # A script cannot pass itself off as a running agent: it is always service:NAME, and nothing replies to it.
+        sender = dict(id='service:' + sender_name, name='service:' + sender_name, host=host())
+    else:
+        sender = me()
     target = resolve(name)
-    ident = secrets.token_hex(12)
+    if expected_session and target.get('session') != expected_session:
+        raise ValueError('recipient session changed; refresh peer --all --json before sending')
+    ident = ident or secrets.token_hex(12)
+    if not re.fullmatch('[a-f0-9]{24}', ident):
+        raise ValueError('--id must be 24 lowercase hex characters')
     outgoing = dict(id=ident, sender=sender['id'], recipient=target['id'], host=target['host'], name=target['name'], created=time.time(), ask=ask)
     # A plain reply needs no re:id. Link to the newest delivered message from
     # that session; parallel unrelated conversations should use separate peers.
@@ -259,6 +273,27 @@ def say(name, body, ask=False, timeout=30):
             waiting_path.unlink(missing_ok=True)
 
 
+def notify(argv):
+    parser = argparse.ArgumentParser(prog='peer notify')
+    parser.add_argument('host', help='local, or a machine from hosts.json')
+    parser.add_argument('message')
+    parser.add_argument('--id', default=secrets.token_hex(12), help='a later notice with the same id replaces this one')
+    parser.add_argument('--state', default='waiting')
+    parser.add_argument('--title', default='Agent')
+    parser.add_argument('--source', help='the session this is about (default: this one)')
+    parser.add_argument('--workspace', default=os.environ.get('SM_WORKSPACE', ''))
+    args = parser.parse_args(argv)
+    current = me(False)
+    source = args.source
+    if source is None:
+        source = ('sm:' + current['name']) if current and str(current.get('target', '')).startswith(('sm:', 'hold:')) else (
+            'fine:' + os.environ['FINE_TAB_ID'] if os.environ.get('FINE_TAB_ID') else '')
+    owner = host() if args.host == 'local' else args.host
+    result = dispatch(owner, dict(op='notify', message=args.message, key=args.id, state=args.state,
+                                  title=args.title, source=source, workspace=args.workspace))
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def main(argv):
     if argv and argv[0] == '_rpc':
         # The request comes on stdin; an argument is still accepted from callers that send it that way.
@@ -270,6 +305,8 @@ def main(argv):
     if argv and argv[0] == 'relay':
         from peer_core import python
         os.execv(python(), [python(), str(BIN / 'peer-relay')] + argv[1:])
+    if argv and argv[0] == 'notify':
+        return notify(argv[1:])
     if argv and argv[0] == '_work':
         work('--once' in argv)
         return
@@ -303,6 +340,12 @@ def main(argv):
   peer doctor                        what works, what is missing, how to fix it
   peer relay status|keygen|install|serve
                                      reach a machine that takes no ssh logins, through a hub
+  peer notify HOST|local TEXT [--title T] [--state S]
+                                     ask for the person's attention through sm's app or Fine
+
+From a script: peer say NAME - --from SCRIPT [--id 24_HEX] [--session ID]
+  '-' reads the text from stdin; it arrives from service:SCRIPT. A retry with the same --id is the
+  same message. --session refuses to send if NAME now runs another engine session.
 
 Messages go through each engine's own input path, never your terminal:
 a draft you are typing stays intact and an approval prompt never gets an Enter.
@@ -323,10 +366,14 @@ One live namesake wins over stopped sessions. Add --json for scripts.''')
     elif argv[0] in ('say', 'ask'):
         parser = argparse.ArgumentParser(prog='peer ' + argv[0])
         parser.add_argument('name');parser.add_argument('text');parser.add_argument('--timeout', type=float, default=30)
+        parser.add_argument('--from', dest='sender_name', help='send from a script, shown as service:NAME')
+        parser.add_argument('--id', help='stable 24-hex message id; a retry keeps the same text')
+        parser.add_argument('--session', help='refuse delivery if NAME now runs another engine session')
         args = parser.parse_args(argv[1:])
         if not 0 < args.timeout <= 60:
             raise ValueError('timeout must be in (0, 60] seconds')
-        result = say(args.name, args.text, argv[0] == 'ask', args.timeout)
+        result = say(args.name, sys.stdin.read() if args.text == '-' else args.text, argv[0] == 'ask', args.timeout,
+                     sender_name=args.sender_name, ident=args.id, expected_session=args.session)
     elif argv[0] == 'receipt':
         owner, ident = argv[1].split('/', 1)
         result = dict(dispatch(owner, {'op': 'receipt', 'id': ident}), owner=owner)
