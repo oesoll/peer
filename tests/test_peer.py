@@ -633,6 +633,21 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(got[1], 0xA)
         ws.close(); server_sock.close()
 
+    def test_mail_to_an_agent_whose_turn_failed(self):
+        # a passing API error: the agent is back at its prompt, so mail goes the idle way, not held for a next turn
+        row = self.observe('StopFailure', error='server_error')
+        req, _ = self.message(row)
+        d.attempt(c.mail_path(row['id'], req['id']))
+        rec = c.receipt(req['id'])
+        self.assertNotIn('turn failed', rec.get('reason') or '')
+        self.assertIn('accept-inbound', rec.get('reason') or '')  # the idle Claude route (no inbox in the fixture)
+        # a usage limit fails the next turn too: held, saying why and when it moves
+        row = self.observe('StopFailure', sid='limited', error='rate_limit', error_details='resets 5pm')
+        req, _ = self.message(row)
+        d.attempt(c.mail_path(row['id'], req['id']))
+        rec = c.receipt(req['id'])
+        self.assertEqual(rec['stage'], 'held')
+        self.assertEqual(rec['reason'], 'its last turn failed (rate_limit resets 5pm); delivered when it takes its next turn')
 
     def test_hold_targets_and_fields(self):
         def held(name):  # a real holder: this test process stands in as the agent's ancestor

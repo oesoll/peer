@@ -104,6 +104,8 @@ def rpc(request, source):
         row = receipt(request['id'])
         if not row:
             raise ValueError('receipt not found on ' + host())
+        if row.get('stage') in ('queued', 'held'):
+            start_worker()  # whoever asks about waiting mail gets a worker on it
         return row
     if op == 'read':
         from peer_history import history

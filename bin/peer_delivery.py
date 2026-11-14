@@ -206,11 +206,18 @@ HELD = {
     'blocked': 'waiting on its user (an approval or a question); delivered once that is answered',
     'gone': 'that session has ended; delivered if it is resumed',
     'unknown': 'its state is unknown; retried as soon as it reports in',
-    'error': 'its engine reported an error; retried once it recovers',
 }
 
 
 MAIL_TTL = 6 * 3600  # undelivered this long: the moment has passed, so close it rather than inject it late
+
+
+def transient_failure(reason):
+    """A turn that failed on the API's side (server_error, overloaded, a timeout) can simply be tried again; a usage or
+    billing limit fails the next turn the same way, so mail waits for that one instead."""
+    why = (reason or '').lower()
+    return any(word in why for word in ('server_error', 'overloaded', 'api_error', 'timeout', 'connection', 'network')) \
+        and not any(word in why for word in ('rate_limit', 'billing', 'usage', 'quota'))
 
 
 def attempt(file):
@@ -237,10 +244,17 @@ def attempt(file):
             wake(row)
             update_receipt(mail['id'], stage='queued', reason='waking the session')
             return
-        state = public(row)['state']
-        if state in ('blocked', 'gone', 'unknown', 'error'):
-            why = public(row).get('reason') if state == 'error' else None
-            update_receipt(mail['id'], stage='held', reason=HELD.get(state, state) + (': ' + why if why else ''))
+        state, why = public(row)['state'], public(row).get('reason')
+        if state == 'error' and transient_failure(why):
+            # The last turn died on a passing API error and the agent sits at its prompt. Holding until it takes
+            # another turn would hold mail for good when nobody types there.
+            state = 'idle'
+        if state == 'error':
+            update_receipt(mail['id'], stage='held', reason='its last turn failed (%s); delivered when it takes its next turn'
+                           % (why or 'error'))
+            return
+        if state in ('blocked', 'gone', 'unknown'):
+            update_receipt(mail['id'], stage='held', reason=HELD[state])
             return
         try:
             if row['kind'] == 'omo':
