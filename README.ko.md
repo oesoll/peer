@@ -44,7 +44,7 @@ peer install --accept-inbound --codex-alias
 peer doctor                     # 되는 것, 빠진 것, 채우는 명령
 ```
 
-Python 3.9 이상이면 돼요. tmux가 있으면 `peer spawn`과 가까운 순 목록도 써요. 설치 뒤 Codex에서 `/hooks`로 새 훅을 한 번 신뢰해 주세요.
+Python 3.9 이상이면 돼요. tmux가 있으면 `peer spawn`과 가까운 순 목록도 써요. sm 세션 층이 peer 옆에 깔려 있으면 `peer spawn`은 tmux 대신 sm으로 띄워요. 설치 뒤 Codex에서 `/hooks`로 새 훅을 한 번 신뢰해 주세요.
 
 - `--accept-inbound`: 없으면 쉬는 Claude에게 보낸 메시지는 그 세션의 다음 턴까지 기다려요(아래 설명).
 - `--codex-alias`: 셸 설정에 `alias codex='peer run codex'`를 넣어요. Codex는 peer를 거쳐 띄운 세션만 받을 수 있는데, 이 별칭이 평소 치는 `codex`를 그 세션으로 만들어요. `codex exec`, `codex login` 같은 비대화형 명령은 그대로 Codex를 실행해요.
@@ -60,11 +60,11 @@ peer                               # 내 근처: 같은 tmux 세션 → 비슷�
 peer say 이름 "글"                  # delivered, 아니면 queued/held와 무엇을 기다리는지, 고치는 법
 peer ask 이름 "질문"                # 최대 60초 기다렸다가 답을 출력
 peer read 이름 --last 2             # 화면 말고 엔진 대화 기록에서 마지막 답
-peer spawn reviewer --kind codex   # tmux에 띄우고 준비되면 돌아옴
+peer spawn reviewer --kind codex   # tmux(또는 sm)에 띄우고 준비되면 돌아옴
 peer name reviewer                 # 이 세션 이름 바꾸기(재개해도 유지)
 ```
 
-이름은 tmux 세션과 패널 라벨에서 지어요. `tmux set -p @peer review`를 해 두면 `work-review`가 돼요. 라벨이 없으면 폴더와 엔진 이름을 써요. 사람 승인을 기다리는 상대에게 보낸 메시지는 들고 있다가, 풀리면 넣어요.
+이름은 tmux 세션과 패널 라벨에서 지어요. `tmux set -p @peer review`를 해 두면 `work-review`가 돼요. 라벨이 없으면 폴더와 엔진 이름을 써요. Fine 탭은 한 번, 탭 제목으로 이름을 지어요. 사람 승인을 기다리는 상대에게 보낸 메시지는 들고 있다가, 풀리면 넣어요.
 
 메시지를 받은 에이전트의 턴이 실패하면(rate limit, 과부하, API 오류) peer가 보낸 쪽에 이유를 알려 줘요. 오지 않을 답을 계속 기다리지 않게요. `peer` 목록에도 `error` 옆에 이유가 나와요.
 
@@ -79,7 +79,16 @@ peer name reviewer                 # 이 세션 이름 바꾸기(재개해도 �
 { "server": { "ssh": "me@server" } }
 ```
 
-그 기기에 있는 상대에게는 `ssh me@server ~/.local/bin/peer _rpc …`로 전해요. 그쪽에도 peer를 깔고, 답이 돌아오게 그쪽 hosts.json에도 이 기기를 적어 주세요.
+그 기기에 있는 상대에게는 `ssh me@server ~/.local/bin/peer _rpc …`로 전해요. 요청은 stdin으로 가요. 그쪽에도 같은 버전의 peer를 깔고, 답이 돌아오게 그쪽 hosts.json에도 이 기기를 적어 주세요.
+
+ssh 로그인을 받지 않는 기기(원격 로그인을 끈 노트북)는 대신 허브로 나가는 터널을 열어 둬요. 허브는 sshd가 있고 양쪽이 닿는 아무 기기면 돼요. 터널로 오가는 요청은 내 기기들만 가진 키로 서명해서, 허브가 명령을 넣거나 답을 꾸밀 수 없어요. 허브 뒤의 기기마다 이렇게 적어요.
+
+```json
+// ~/.config/peer/relay.json   (ssh_alias: ~/.ssh/config의 Host)
+{ "name": "home", "ssh_alias": "hub", "remote_dir": "/home/me/.peer-relay" }
+```
+
+한 기기에서 `peer relay keygen`을 하고 `~/.config/peer/relay.key`(권한 600)를 다른 기기들에 복사해요. 허브에는 두지 마세요. 그다음 기기마다 `peer relay install`로 터널을 띄워 둬요. 이렇게 닿는 기기는 hosts.json에 `{ "laptop": { "relay": "home" } }`로 적어요. `peer relay status`가 경로마다 확인해 줘요.
 
 ### 내 런처를 쓴다면
 
@@ -98,7 +107,7 @@ Claude Code는 보낸 쪽이 같은 권한 모드로 도는 Claude 세션이라�
 
 - Claude의 내장 받은편지함은 공개 API가 아니에요. peer는 관찰한 프로토콜(`peerProtocol: 1`)을 쓰고, 바뀌면 훅 경로로 물러나요. 그래도 Claude Code 업데이트 때 빠른 길이 깨질 수 있어요.
 - Codex는 peer를 거쳐 띄운 세션만 받아요(`peer run codex`, `peer spawn --kind codex`, 또는 `--codex-alias`를 켠 `codex`). Claude보다 덜 다듬어졌어요.
-- 기기 사이에서는 받는 쪽이 보낸 쪽 기기 이름을 그대로 믿어요. ssh로 같은 사용자임은 이미 확인된 상태예요.
+- 기기 사이에서는 받는 쪽이 보낸 쪽 기기 이름을 그대로 믿어요. ssh(또는 relay 키)로 같은 사용자임은 이미 확인된 상태예요.
 - 하위 에이전트나 긴 셸처럼 뒤에서 도는 작업이 있으면 `idle`로 보일 수 있어요.
 
 Anthropic, OpenAI와 무관한 개인 도구예요. MIT 라이선스.

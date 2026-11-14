@@ -49,7 +49,7 @@ peer install --accept-inbound --codex-alias
 peer doctor                     # what works, what is missing, and the command that fixes it
 ```
 
-You need Python 3.9+ and nothing else; tmux adds `peer spawn` and nearby-first listing. After install, Codex asks you once in `/hooks` to trust the new hooks.
+You need Python 3.9+ and nothing else; tmux adds `peer spawn` and nearby-first listing. When the sm session layer is installed alongside peer, `peer spawn` starts agents through it instead of tmux. After install, Codex asks you once in `/hooks` to trust the new hooks.
 
 - `--accept-inbound`: without it, a message to an idle Claude waits for that session's next turn (see below).
 - `--codex-alias`: adds `alias codex='peer run codex'` to your shell rc. Only Codex started through peer can receive; the alias makes your usual `codex` that one. `codex exec`, `codex login` and other non-interactive commands still run Codex directly.
@@ -65,11 +65,11 @@ peer                               # who is near you: same tmux session, similar
 peer say NAME "text"               # delivered, or queued/held with what it waits for and how to fix it
 peer ask NAME "question"           # wait up to 60s for the reply
 peer read NAME --last 2            # their last answers, read from engine history, not the screen
-peer spawn reviewer --kind codex   # start one in a detached tmux session, return when ready
+peer spawn reviewer --kind codex   # start one (detached tmux, or sm), return when ready
 peer name reviewer                 # rename the current session; the name follows resume
 ```
 
-Names are made from the tmux session and pane label (`tmux set -p @peer review` gives `work-review`), otherwise from the folder and engine. A message to an agent that is waiting on its user is held and delivered once it is free.
+Names are made from the tmux session and pane label (`tmux set -p @peer review` gives `work-review`), otherwise from the folder and engine. A Fine tab is named once after its title. A message to an agent that is waiting on its user is held and delivered once it is free.
 
 If a recipient's turn fails after taking your message (a rate limit, an overload, an API error), peer tells the sender why, so an agent isn't left waiting for a reply that will never come. `peer` shows the reason next to `error`.
 
@@ -84,7 +84,16 @@ An already registered Claude session is rediscovered after resume from Claude's 
 { "server": { "ssh": "me@server" } }
 ```
 
-peer runs `ssh me@server ~/.local/bin/peer _rpc …` for anything that lives there. Set `"peer"` in the entry if it is installed elsewhere. Install peer on that machine too, and add this one to its hosts.json so replies can come back.
+peer runs `ssh me@server ~/.local/bin/peer _rpc …` for anything that lives there, with the request on stdin. Set `"peer"` in the entry if it is installed elsewhere. Install the same version of peer on that machine too, and add this one to its hosts.json so replies can come back.
+
+A machine that takes no ssh logins (a laptop with Remote Login off) keeps an outbound tunnel to a hub instead, any machine with sshd that both can reach. Requests through it are signed with a key only your own machines hold, so the hub can neither read commands into them nor forge an answer. On each machine behind the hub:
+
+```json
+// ~/.config/peer/relay.json   (ssh_alias: a Host in ~/.ssh/config)
+{ "name": "home", "ssh_alias": "hub", "remote_dir": "/home/me/.peer-relay" }
+```
+
+Run `peer relay keygen` on one of them, copy `~/.config/peer/relay.key` (mode 600) to the others but never to the hub, then `peer relay install` on each to keep its tunnel up. In hosts.json such a machine is `{ "laptop": { "relay": "home" } }`. `peer relay status` checks every route.
 
 ### Your own launchers
 
@@ -105,7 +114,7 @@ Claude Code delivers a cross-session message without asking only when it can vou
 
 - Claude's cross-session inbox is not a public API. peer uses the protocol it observed (`peerProtocol: 1`) and falls back to hooks when that changes, but a Claude Code update can break the fast path.
 - Codex sessions are reachable only when started through peer (`peer run codex`, `peer spawn --kind codex`, or plain `codex` with `--codex-alias`). Codex support is newer and less tested than Claude support.
-- Between machines, the receiving side trusts the origin name it is given. ssh has already proven you are the same user there.
+- Between machines, the receiving side trusts the origin name it is given. ssh (or the relay key) has already proven you are the same user there.
 - A session doing background work (a subagent, a long shell) can show as `idle`.
 
 Not affiliated with Anthropic or OpenAI. MIT licensed.
