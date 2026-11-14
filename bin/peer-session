@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from peer_codex import watch
+from peer_codex import prepare_resume, watch
 from peer_core import config, launcher, root
 from peer_transport import BIN
 
@@ -62,6 +62,31 @@ def first_word(args):
             continue
         return i, args[i]
     return None, None
+
+
+BYPASS = {'--dangerously-bypass-approvals-and-sandbox'}
+
+
+def unattended_resume(args):
+    """(thread, args) for a resume that explicitly asks to run without approvals, else (None, args).
+
+    Codex keeps a thread's stored policy when a --remote TUI resumes it and refuses the override there, so the
+    policy goes to the server first (prepare_resume) and the override is left out of the TUI's arguments.
+    Two spellings: Codex's own `resume THREAD --dangerously-bypass-approvals-and-sandbox`, and `-ry THREAD`
+    (or -yr), a wrapper shorthand that sm uses; such a wrapper turns it into a plain remote resume itself."""
+    prefix = args[:args.index('--')] if '--' in args else list(args)
+    flag = next((i for i, a in enumerate(prefix) if a in ('-ry', '-yr')), None)
+    if flag is not None:
+        if flag + 1 >= len(prefix) or prefix[flag + 1].startswith('-'):
+            raise ValueError('unattended resume needs a thread id: -ry THREAD_ID')
+        return prefix[flag + 1], args
+    at, word = first_word(prefix)
+    if word != 'resume' or not BYPASS.intersection(prefix):
+        return None, args
+    _, thread = first_word(prefix[at + 1:])
+    if not thread:
+        return None, args  # `resume --last`: no thread to set; Codex says what it thinks of the flag
+    return thread, [a for a in args if a not in BYPASS]
 
 
 def tui_args(args, sock):
@@ -119,6 +144,7 @@ def main(args):
     signal.signal(signal.SIGTERM, interrupted)
     stopped = threading.Event()
     server = None
+    thread, args = unattended_resume(args)
     # /tmp keeps the socket path under macOS's 104-byte limit; a longer one fails to bind.
     with tempfile.TemporaryDirectory(prefix='peer-codex-', dir='/tmp') as temp:
         sock = str(Path(temp) / 'c.sock')
@@ -133,6 +159,8 @@ def main(args):
                 if server.poll() is not None:
                     sys.exit('peer: codex app-server exited during startup')
                 time.sleep(.1)
+            if thread:
+                prepare_resume(sock, thread)
             threading.Thread(target=watch, args=(server, sock, stopped), daemon=True).start()
             result = subprocess.run(launcher('codex') + tui_args(args, sock), env=env)
         finally:

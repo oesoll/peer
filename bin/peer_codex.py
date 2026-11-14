@@ -6,6 +6,24 @@ from peer_core import claim_name, hold_fields, host, pane_label, lock, path, pro
 from peer_transport import CodexClient
 
 
+def prepare_resume(endpoint, thread):
+    """Set a thread to run without approvals before a TUI resumes it through this server. A TUI attached with
+    --remote cannot override a thread's stored policy (Codex refuses the flag there), so an explicit unattended
+    resume is applied here, to that thread only. Model and effort arguments stay with the TUI."""
+    try:
+        with CodexClient(endpoint) as client:
+            # This connection only sets policy; the TUI loads the conversation.
+            # Fetching turns here can exceed the transport limit on long threads.
+            client.call('thread/resume', {'threadId': thread, 'approvalPolicy': 'never',
+                                          'sandbox': 'danger-full-access', 'excludeTurns': True})
+    except Exception as error:
+        # Never let this keep the agent from starting. A long thread's reply can exceed the frame limit, but the
+        # server applied the policy before replying; any other failure only means the thread keeps its stored
+        # policy and may ask for approval.
+        import sys
+        print('peer: could not pre-set the unattended policy (%s); resuming anyway' % error, file=sys.stderr)
+
+
 def last_turn(client, sid):
     """How the newest turn ended: (failed?, why). A failed turn leaves the thread in systemError or plain idle."""
     turns = client.call('thread/turns/list', {'threadId': sid, 'limit': 1, 'itemsView': 'notLoaded'}).get('data') or []
