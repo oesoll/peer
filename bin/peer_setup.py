@@ -26,7 +26,10 @@ def codex_dir():
 
 
 def hook_command(kind):
-    return shlex.join([sys.executable, str(BIN / 'peer-hook'), '--kind', kind])
+    """The hook names python3 as PATH finds it (/usr/bin/python3 on a Mac), not this interpreter's own path: on a
+    Mac that is inside one Xcode or Command Line Tools version, and every hook broke when it was removed."""
+    stable = shutil.which('python3')
+    return shlex.join([stable or sys.executable, str(BIN / 'peer-hook'), '--kind', kind])
 
 
 def save(path, data):
