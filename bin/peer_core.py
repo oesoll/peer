@@ -446,17 +446,25 @@ def free_name(names, preferred, ident):
     return chosen
 
 
-def hand_over_sm_name(names, name, ident):
+def hand_over_sm_name(names, name, ident, process=None):
     """sm reuses a closed session's name, but that session's peer row kept it, so the new one became name-2 and mail
     for name went to the dead row. When sm's own record gives name to this session and the old owner has ended,
-    the name moves here and the old row steps aside to name-N."""
+    the name moves here and the old row steps aside to name-N.
+
+    The same running agent in a new conversation (/clear, /resume: same pid and start time, the old one ended)
+    takes its name along too. sm's record still names the old conversation then and the process is alive, so
+    neither test above held, and mail for the name waited on the ended conversation for good."""
     owner = names.get(name)
-    if not owner or owner == ident or sm_entry(name).get('session') != ident.partition(':')[2]:
+    if not owner or owner == ident:
         return
     file = path('sessions', owner)
     row = read(file)
-    if row and alive(row):
-        return
+    if not (process and row and row.get('state') == 'gone' and row.get('kind') == ident.partition(':')[0]
+            and row.get('process') == process):
+        if sm_entry(name).get('session') != ident.partition(':')[2]:
+            return
+        if row and alive(row):
+            return
     if row:
         row['name'] = free_name(names, name, None)
         names[row['name']] = owner
@@ -464,7 +472,7 @@ def hand_over_sm_name(names, name, ident):
     del names[name]
 
 
-def claim_name(ident, preferred, explicit=False, rename=False):
+def claim_name(ident, preferred, explicit=False, rename=False, process=None):
     file = root() / 'names.json'
     with lock(file, .02):
         names = read(file)
@@ -474,7 +482,7 @@ def claim_name(ident, preferred, explicit=False, rename=False):
         if previous == preferred:
             return previous
         preferred = valid_name(preferred)
-        hand_over_sm_name(names, preferred, ident)
+        hand_over_sm_name(names, preferred, ident, process)
         chosen = preferred
         n = 2
         while chosen in names and names[chosen] != ident:
@@ -557,13 +565,13 @@ def observe(event, kind):
             label = None if os.environ.get('PEER_NAME') else pane_label()
             preferred = clean_name(os.environ.get('PEER_NAME')) or label or base[:45] + '-' + kind
             if not name or label:
-                name = claim_name(ident, preferred, rename=bool(name))
+                name = claim_name(ident, preferred, rename=bool(name), process=agent)
         # sm passes the session's name as PEER_NAME. It wins over a name this session picked up on its own
         # (e.g. its last hook in another terminal before sm resumed it), but never over one chosen with `peer name`.
         wanted = clean_name(os.environ.get('PEER_NAME'))
         if wanted and name != wanted and not old.get('chosen'):
             try:
-                name = claim_name(ident, wanted, rename=True)
+                name = claim_name(ident, wanted, rename=True, process=agent)
             except ValueError:
                 pass
         now = time.time()

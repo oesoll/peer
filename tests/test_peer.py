@@ -730,6 +730,16 @@ class PeerTests(unittest.TestCase):
                 self.observe(sid='live')
                 self.assertEqual(self.observe(sid='third')['name'], 'busy-2')
 
+    def test_a_cleared_conversation_takes_its_name_along(self):
+        """/clear in an sm session: same process, new session id, and sm still names the old conversation."""
+        folder, layer = self.fake_sm()
+        (folder / 'sessions/lead.json').write_text(json.dumps(dict(name='lead', session='before')))
+        with patch.object(c, 'sm', return_value=layer), patch.dict(os.environ, PEER_NAME='lead'):
+            old = self.observe(sid='before')
+            self.observe(event='SessionEnd', sid='before')
+            self.assertEqual(self.observe(sid='after')['name'], 'lead')
+            self.assertEqual(c.session(old['id'])['name'], 'lead-2')
+
     def test_fine_tabs_get_their_titles_as_names(self):
         self.engine_file(sid='tabsid')
         old = self.observe(sid='autoname')  # registered by the hook under a folder name
