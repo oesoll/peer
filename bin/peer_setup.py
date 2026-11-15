@@ -110,6 +110,32 @@ def set_alias(remove=False):
     return rc if save_text(rc, text) else None
 
 
+CODEX_RULES = """# peer: messages between coding agents (installed by `peer install`, removed by `peer install uninstall`).
+# These only talk to peer's own socket, which Codex's sandbox blocks, so a reply would wait on an approval
+# nobody is there to give. Starting agents and running commands on other machines are not listed.
+prefix_rule(pattern=["peer", ["say", "ask", "read", "wait", "me", "notify"]], decision="allow")
+"""
+
+
+def codex_rules():
+    return codex_dir() / 'rules' / 'peer.rules'
+
+
+def set_codex_rules(remove=False):
+    """Codex runs a command outside its sandbox without asking when a rules file allows it."""
+    file = codex_rules()
+    if remove:
+        if file.exists():
+            file.unlink()
+            return True
+        return False
+    if file.exists() and file.read_text() == CODEX_RULES:
+        return False
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(CODEX_RULES)
+    return True
+
+
 def install(argv):
     remove = argv[:1] == ['uninstall']
     accept = '--accept-inbound' in argv
@@ -119,6 +145,8 @@ def install(argv):
         changed.append(str(claude_dir() / 'settings.json'))
     if codex_dir().exists() and set_hooks(codex_dir() / 'hooks.json', 'codex', CODEX_EVENTS, remove):
         changed.append(str(codex_dir() / 'hooks.json'))
+    if codex_dir().exists() and set_codex_rules(remove):
+        changed.append(str(codex_rules()))
     settings = claude_dir() / 'settings.json'
     if accept and not remove:
         data = read(settings)
@@ -170,6 +198,9 @@ def doctor(argv):
     if codex_dir().exists():
         codex_ok = hooks_installed(codex_dir() / 'hooks.json', 'codex')
         line('✓' if codex_ok else '✗', 'Codex hooks', 'trust them once with /hooks in Codex', '' if codex_ok else 'peer install')
+        rules_ok = codex_rules().exists() and codex_rules().read_text() == CODEX_RULES
+        line('✓' if rules_ok else '✗', 'Codex replies', 'peer say runs without an approval' if rules_ok
+             else 'each reply from Codex waits for an approval', '' if rules_ok else 'peer install')
     inbound = read(claude_dir() / 'settings.json').get('crossSessionInbound')
     line('✓' if inbound == 'accept' else '·', 'idle Claude reachable', 'crossSessionInbound=%s' % (inbound or 'unset'),
          '' if inbound == 'accept' else 'peer install --accept-inbound  (otherwise messages wait for the next turn)')

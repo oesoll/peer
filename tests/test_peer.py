@@ -589,6 +589,17 @@ class PeerTests(unittest.TestCase):
         self.assertEqual(json.loads((claude / 'settings.json').read_text()), mine)
         self.assertFalse((self.root / 'no-codex').exists())  # no Codex, nothing created
 
+    def test_install_lets_codex_reply_without_an_approval(self):
+        codex = self.root / 'codex-home'; codex.mkdir()
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(self.root / 'claude-r'), CODEX_HOME=str(codex)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            setup.install(['install'])
+            rules = (codex / 'rules' / 'peer.rules').read_text()
+            self.assertIn('prefix_rule(pattern=["peer", ["say", "ask", "read", "wait", "me", "notify"]]', rules)
+            self.assertNotIn('"spawn"', rules)
+            setup.install(['uninstall'])
+            self.assertFalse((codex / 'rules' / 'peer.rules').exists())
+
     def test_run_codex_gives_config_overrides_to_the_server(self):
         loader = importlib.machinery.SourceFileLoader('peer_session', str(BIN / 'peer-session'))
         spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -729,6 +740,17 @@ class PeerTests(unittest.TestCase):
             with patch.dict(os.environ, PEER_NAME='busy'):
                 self.observe(sid='live')
                 self.assertEqual(self.observe(sid='third')['name'], 'busy-2')
+
+    def test_a_closed_name_goes_to_the_session_that_asks_for_it(self):
+        """No sm: `PEER_NAME=review peer run codex` again after the last one was closed takes review back."""
+        with patch.dict(os.environ, PEER_NAME='review'):
+            old = self.observe(sid='old')
+            self.observe(event='SessionEnd', sid='old')
+        c.write(c.path('sessions', old['id']), dict(c.session(old['id']), process=dict(old['process'], start=[0, 0])))
+        self.assertEqual(self.observe(sid='other')['name'] != 'review', True)  # not asked for: it stays put
+        with patch.dict(os.environ, PEER_NAME='review'):
+            self.assertEqual(self.observe(sid='new')['name'], 'review')
+        self.assertEqual(c.session(old['id'])['name'], 'review-2')
 
     def test_a_cleared_conversation_takes_its_name_along(self):
         """/clear in an sm session: same process, new session id, and sm still names the old conversation."""

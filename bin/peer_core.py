@@ -459,8 +459,13 @@ def hand_over_sm_name(names, name, ident, process=None):
         return
     file = path('sessions', owner)
     row = read(file)
-    if not (process and row and row.get('state') == 'gone' and row.get('kind') == ident.partition(':')[0]
-            and row.get('process') == process):
+    same_agent = process and row and row.get('state') == 'gone' and row.get('kind') == ident.partition(':')[0] \
+        and row.get('process') == process
+    # Started again under the name it asked for (PEER_NAME=review peer run codex, after the last one was closed):
+    # without sm there is no record to say so, and the new session became review-2 while `peer say review` waited
+    # on the closed one. Mail already sent stays with the conversation it was sent to.
+    asked = clean_name(os.environ.get('PEER_NAME')) == name and row and row.get('state') == 'gone' and not alive(row)
+    if not (same_agent or asked):
         if sm_entry(name).get('session') != ident.partition(':')[2]:
             return
         if row and alive(row):
