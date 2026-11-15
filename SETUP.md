@@ -8,7 +8,7 @@ This page is for the coding agent (Claude Code, Codex, or another) that a person
 curl -fsSL https://raw.githubusercontent.com/oesoll/peer/main/install.sh | sh
 ```
 
-This clones peer to `~/.local/share/peer`, links `~/.local/bin/peer`, adds peer's hooks to Claude Code (and Codex if installed), and installs the agent skill. If `peer` is not found afterwards, `~/.local/bin` is missing from PATH: add it to their shell rc and tell them.
+This clones peer to `~/.local/share/peer`, links `~/.local/bin/peer`, adds peer's hooks to Claude Code (and Codex if installed), lets both run peer's message commands without asking each time (so a reply never waits on an approval nobody is there to give; a command with something run inside it still asks), and installs the agent skill. If `peer` is not found afterwards, `~/.local/bin` is missing from PATH: add it to their shell rc and tell them.
 
 ## 2. Read `peer doctor`
 

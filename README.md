@@ -51,6 +51,8 @@ peer doctor                     # what works, what is missing, and the command t
 
 You need Python 3.9+ and nothing else; tmux adds `peer spawn` and nearby-first listing. When the sm session layer is installed alongside peer, `peer spawn` starts agents through it instead of tmux. After install, Codex asks you once in `/hooks` to trust the new hooks.
 
+`peer install` also lets your agents run peer's message commands (`peer say`, `ask`, `read`, `wait`, `me`, `notify`) without asking each time: `Bash(peer say:*)` and the like in Claude's `permissions.allow`, and `~/.codex/rules/peer.rules` for Codex, whose sandbox otherwise blocks peer's socket. Without them, a reply to a message waits on an approval nobody is at the screen to give. A command with something run inside it (`peer say x "$(…)"`) still asks in both. `peer install uninstall` removes them with the hooks.
+
 - `--accept-inbound`: without it, a message to an idle Claude waits for that session's next turn (see below).
 - `--codex-alias`: adds `alias codex='peer run codex'` to your shell rc. Only Codex started through peer can receive; the alias makes your usual `codex` that one. `codex exec`, `codex login` and other non-interactive commands still run Codex directly.
 

@@ -46,6 +46,8 @@ peer doctor                     # 되는 것, 빠진 것, 채우는 명령
 
 Python 3.9 이상이면 돼요. tmux가 있으면 `peer spawn`과 가까운 순 목록도 써요. sm 세션 층이 peer 옆에 깔려 있으면 `peer spawn`은 tmux 대신 sm으로 띄워요. 설치 뒤 Codex에서 `/hooks`로 새 훅을 한 번 신뢰해 주세요.
 
+`peer install`은 에이전트가 peer의 메시지 명령(`peer say`, `ask`, `read`, `wait`, `me`, `notify`)을 매번 묻지 않고 실행하게도 해요. Claude는 `permissions.allow`에 `Bash(peer say:*)` 같은 규칙을, Codex는 `~/.codex/rules/peer.rules`를 넣어요. Codex의 샌드박스는 이게 없으면 peer 소켓을 막아요. 둘 다 없으면 받은 메시지에 답할 때 화면 앞에 아무도 없는 승인 창에서 멈춰요. 안에서 다른 명령을 실행하는 형태(`peer say x "$(…)"`)는 둘 다 여전히 물어요. `peer install uninstall`은 훅과 함께 이것도 지워요.
+
 - `--accept-inbound`: 없으면 쉬는 Claude에게 보낸 메시지는 그 세션의 다음 턴까지 기다려요(아래 설명).
 - `--codex-alias`: 셸 설정에 `alias codex='peer run codex'`를 넣어요. Codex는 peer를 거쳐 띄운 세션만 받을 수 있는데, 이 별칭이 평소 치는 `codex`를 그 세션으로 만들어요. `codex exec`, `codex login` 같은 비대화형 명령은 그대로 Codex를 실행해요.
 

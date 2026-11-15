@@ -117,6 +117,35 @@ prefix_rule(pattern=["peer", ["say", "ask", "read", "wait", "me", "notify"]], de
 """
 
 
+MESSAGE_VERBS = ('say', 'ask', 'read', 'wait', 'me', 'notify')
+CLAUDE_ALLOW = ['Bash(peer %s:*)' % verb for verb in MESSAGE_VERBS]
+
+
+def set_claude_allow(remove=False):
+    """The same for Claude: in its default (manual) mode every peer say asked first, so a reply to a message
+    waited on an approval. Only these rules are added or removed; the person's own stay as they are. A command
+    with something run inside it (peer say x "$(...)") still asks: Claude cannot check it before it runs."""
+    file = claude_dir() / 'settings.json'
+    data = read(file)
+    permissions = data.setdefault('permissions', {})
+    allow = [rule for rule in permissions.get('allow', []) if rule not in CLAUDE_ALLOW]
+    if not remove:
+        allow += CLAUDE_ALLOW
+    if allow == permissions.get('allow', []) or (remove and 'allow' not in permissions):
+        return False
+    if allow:
+        permissions['allow'] = allow
+    else:
+        permissions.pop('allow', None)
+    if not permissions:
+        data.pop('permissions', None)
+    return save(file, data)
+
+
+def claude_allow_installed():
+    return all(rule in read(claude_dir() / 'settings.json').get('permissions', {}).get('allow', []) for rule in CLAUDE_ALLOW)
+
+
 def codex_rules():
     return codex_dir() / 'rules' / 'peer.rules'
 
@@ -147,6 +176,8 @@ def install(argv):
         changed.append(str(codex_dir() / 'hooks.json'))
     if codex_dir().exists() and set_codex_rules(remove):
         changed.append(str(codex_rules()))
+    if set_claude_allow(remove):
+        changed.append(str(claude_dir() / 'settings.json') + ' (peer messages run without asking)')
     settings = claude_dir() / 'settings.json'
     if accept and not remove:
         data = read(settings)
@@ -195,6 +226,9 @@ def doctor(argv):
         line('✓' if exe else '·', kind, exe or 'not found', '' if exe else 'set {"%s": [...]} in %s if you use a wrapper' % (kind, config() / 'launch.json'))
     claude_ok = hooks_installed(claude_dir() / 'settings.json', 'claude')
     line('✓' if claude_ok else '✗', 'Claude hooks', str(claude_dir() / 'settings.json'), '' if claude_ok else 'peer install')
+    allow_ok = claude_allow_installed()
+    line('✓' if allow_ok else '✗', 'Claude replies', 'peer say runs without an approval' if allow_ok
+         else 'in manual mode each reply waits for an approval', '' if allow_ok else 'peer install')
     if codex_dir().exists():
         codex_ok = hooks_installed(codex_dir() / 'hooks.json', 'codex')
         line('✓' if codex_ok else '✗', 'Codex hooks', 'trust them once with /hooks in Codex', '' if codex_ok else 'peer install')

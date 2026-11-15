@@ -597,8 +597,24 @@ class PeerTests(unittest.TestCase):
             rules = (codex / 'rules' / 'peer.rules').read_text()
             self.assertIn('prefix_rule(pattern=["peer", ["say", "ask", "read", "wait", "me", "notify"]]', rules)
             self.assertNotIn('"spawn"', rules)
+            settings = json.loads((self.root / 'claude-r' / 'settings.json').read_text())
+            self.assertIn('Bash(peer say:*)', settings['permissions']['allow'])
+            self.assertTrue(setup.claude_allow_installed())
             setup.install(['uninstall'])
             self.assertFalse((codex / 'rules' / 'peer.rules').exists())
+            self.assertNotIn('permissions', json.loads((self.root / 'claude-r' / 'settings.json').read_text()))
+
+    def test_claude_allow_rules_leave_the_persons_own_rules(self):
+        claude = self.root / 'claude-own'; claude.mkdir()
+        (claude / 'settings.json').write_text(json.dumps({'permissions': {'allow': ['Bash(git status)'], 'deny': ['Bash(rm:*)']}}))
+        with patch.dict(os.environ, CLAUDE_CONFIG_DIR=str(claude), CODEX_HOME=str(self.root / 'no-codex2')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            setup.install(['install']); setup.install(['install'])
+            allow = json.loads((claude / 'settings.json').read_text())['permissions']['allow']
+            self.assertEqual(allow.count('Bash(peer say:*)'), 1)
+            setup.install(['uninstall'])
+        self.assertEqual(json.loads((claude / 'settings.json').read_text())['permissions'],
+                         {'allow': ['Bash(git status)'], 'deny': ['Bash(rm:*)']})
 
     def test_run_codex_gives_config_overrides_to_the_server(self):
         loader = importlib.machinery.SourceFileLoader('peer_session', str(BIN / 'peer-session'))
