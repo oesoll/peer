@@ -146,6 +146,25 @@ class AttentionTests(unittest.TestCase):
 
 
 class ResumeTests(unittest.TestCase):
+    def test_stock_engines_get_their_own_flags_not_the_wrapper_shorthand(self):
+        skip, bypass = '--dangerously-skip-permissions', '--dangerously-bypass-approvals-and-sandbox'
+        with tempfile.TemporaryDirectory() as cfg, patch.dict(os.environ, PEER_CONFIG=cfg):
+            self.assertEqual(session.stock_args('claude', ['-y']), [skip])
+            self.assertEqual(session.stock_args('claude', ['-ry', 'sid', '--model', 'opus']), ['--resume', 'sid', skip, '--model', 'opus'])
+            self.assertEqual(session.stock_args('claude', ['-r', 'sid']), ['--resume', 'sid'])
+            self.assertEqual(session.stock_args('claude', ['-r']), ['-r'])  # the picker
+            self.assertEqual(session.stock_args('claude', ['-y', '--', '-y is a prompt']), [skip, '--', '-y is a prompt'])
+            self.assertEqual(session.stock_args('codex', ['-y', '-m', 'gpt']), [bypass, '-m', 'gpt'])
+            self.assertEqual(session.stock_args('codex', ['-ry', 'tid']), ['resume', 'tid', bypass])
+            # the codex resume then takes the server path: policy set there, the flag kept off the TUI
+            self.assertEqual(session.unattended_resume(session.stock_args('codex', ['-ry', 'tid'])), ('tid', ['resume', 'tid']))
+            with self.assertRaises(ValueError):
+                session.stock_args('claude', ['-ry'])
+            self.assertEqual(session.stock_args('omo', ['-y']), ['-y'])
+            Path(cfg, 'launch.json').write_text('{"claude": ["ccv"], "codex": ["ccx"]}')
+            self.assertEqual(session.stock_args('claude', ['-y']), ['-y'], 'a wrapper reads its own shorthand')
+            self.assertEqual(session.stock_args('codex', ['-ry', 'tid']), ['-ry', 'tid'])
+
     def test_only_an_explicit_unattended_resume_sets_the_policy(self):
         bypass = '--dangerously-bypass-approvals-and-sandbox'
         for args in (['-r', 'thread'], ['-y', 'new prompt'], ['--', '-ry', 'not-an-option'], ['resume', 'thread'],
