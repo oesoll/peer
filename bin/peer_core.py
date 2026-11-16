@@ -589,6 +589,10 @@ def observe(event, kind):
                    omo_socket=event.get('omo_socket') or old.get('omo_socket'),
                    named=bool(old.get('named') or os.environ.get('PEER_NAME')), chosen=bool(old.get('chosen')),
                    label_checked=True, **hold_fields())
+        # What it was doing when it ended: a machine shutting down ends every agent the same way, and sm restore tells
+        # only the ones that were working to carry on.
+        if state[0] == 'gone':
+            row['before_end'] = old.get('before_end') if old.get('state') == 'gone' else old.get('state')
         # A turn that ended well closes what was asked of it; a failed one tells those still waiting.
         row['turn_ok_at'] = now if event.get('hook_event_name') == 'Stop' else old.get('turn_ok_at')
         if event.get('hook_event_name') == 'StopFailure':

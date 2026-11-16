@@ -99,6 +99,15 @@ class PeerTests(unittest.TestCase):
         self.assertIsNone(self.observe('Stop', agent_id='sub'))
         self.assertEqual(c.session(first['id']), before)
 
+    def test_an_ended_session_remembers_what_it_was_doing(self):
+        # A shutdown ends every agent alike; sm restore asks what each was doing just before.
+        self.observe('UserPromptSubmit', sid='busy')
+        self.assertEqual(self.observe('SessionEnd', sid='busy')['before_end'], 'working')
+        self.assertEqual(self.observe('SessionEnd', sid='busy')['before_end'], 'working')  # a second end keeps it
+        self.observe('Stop', sid='calm')
+        self.assertEqual(self.observe('SessionEnd', sid='calm')['before_end'], 'idle')
+        self.assertNotIn('before_end', self.observe('SessionStart', sid='calm'))
+
     def test_blocked_mail_held_then_hook_delivered_once(self):
         row = self.observe('PermissionRequest')
         req, rec = self.message(row)
